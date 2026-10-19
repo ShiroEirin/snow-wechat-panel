@@ -1620,3 +1620,22 @@
   padding-left: 2px;
   border-left: 2px solid var(--swf-line);
 }
+
+/* ---- 总结视觉增强（v0.32.4）：分区图标 / 排名奖牌 / 层级更清晰 ---- */
+.swf-ico {
+  margin-right: 6px;
+  font-size: 13px;
+  line-height: 1;
+  vertical-align: -1px;
+}
+.swf-rank-medal {
+  display: inline-block;
+  width: 16px;
+  margin-right: 4px;
+  font-size: 12px;
+  text-align: center;
+  vertical-align: -1px;
+}
+.swf-bar-row:nth-child(-n + 3) .swf-bar-name {
+  font-weight: 600;
+}

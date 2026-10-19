@@ -109,20 +109,38 @@ function hasCompleteJson(text) {
   }
 }
 
-/** 把正文里的 JSON 代码块剔掉。
-    结构化数据由面板的卡片单独渲染，正文里再裸露一遍既难读、也会盖住真正的报告文字。
-    （Agent 有时会把 json 块插到正文中间、甚至吐成残片。） */
+/** 把正文里的结构化数据块剔掉。
+    支持两种写法：`<<<AI_JSON>>> … <<<END>>>`（推荐）与 ```json 围栏，
+    另外围栏体以 { [ " 开头的代码块也当作数据块剔掉。
+    （Agent 有时会把数据块插到正文中间、甚至吐成残片。） */
 function stripAiJson(text) {
   const s = String(text || "");
   return s
+    .replace(/<<<AI_JSON>>>[\s\S]*?<<<END>>>/gi, "")
     .replace(/```([a-zA-Z]*)\r?\n([\s\S]*?)```/g, (all, lang, body) => {
       const t = String(body || "").trim();
       if (/^json$/i.test(String(lang || "").trim())) return "";
-      if (/^["{[]/.test(t)) return "";
+      if (/^["{\[]/.test(t)) return "";
       return all;
     })
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** 从一段混杂文本里取出**最后一个能解析**的 JSON 对象 —— 用来补救模型把 json 写残的情况。 */
+function lastJsonObject(text) {
+  const s = String(text || "");
+  for (let end = s.lastIndexOf("}"); end > 0; end = s.lastIndexOf("}", end - 1)) {
+    for (let start = s.lastIndexOf("{", end); start >= 0; start = s.lastIndexOf("{", start - 1)) {
+      try {
+        const v = JSON.parse(s.slice(start, end + 1));
+        if (v && typeof v === "object" && !Array.isArray(v)) return v;
+      } catch (err) {
+        /* 继续往前找 */
+      }
+    }
+  }
+  return null;
 }
 
 /** 从 messages 域载荷里读出「最后一条 assistant 消息」的正文与完成状态。
@@ -271,7 +289,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "话题分布（Agent）"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🗂️"), "话题分布（Agent）"),
             (() => {
               const maxW = aiData.topics.reduce((a, x) => Math.max(a, Number(x && x.weight) || 0), 1);
               return aiData.topics.map((x, i) =>
@@ -299,7 +317,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "待办"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "✅"), "待办"),
             aiData.todos.map((x, i) => h("div", { className: "swf-todo", key: "todo-" + i }, h("b", null, x.who || "?"), " · ", String(x.what || ""))),
           )
         : null,
@@ -307,7 +325,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "风险 / 争议"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "⚠️"), "风险 / 争议"),
             aiData.risks.map((r, i) => h("div", { className: "swf-risk", key: "risk-" + i }, "• ", String(r))),
           )
         : null,
@@ -315,7 +333,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "情绪曲线（-100 负面 / +100 正面）"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "📈"), "情绪曲线（-100 负面 / +100 正面）"),
             h(
               "div",
               { className: "swf-senti" },
@@ -341,7 +359,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "争议指数"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "⚔️"), "争议指数"),
             aiData.controversies.map((x, i) =>
               h(
                 "div",
@@ -358,7 +376,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "称号评定"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🏅"), "称号评定"),
             h(
               "div",
               { className: "swf-words" },
@@ -372,7 +390,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "金句"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "💬"), "金句"),
             aiData.quotes.map((x, i) =>
               h(
                 "div",
@@ -389,7 +407,7 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, "群画像"),
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "👥"), "群画像"),
             aiData.profile.summary ? h("div", { className: "swf-note" }, String(aiData.profile.summary)) : null,
             aiData.profile.style ? h("div", { className: "swf-note" }, "风格：" + String(aiData.profile.style)) : null,
             Array.isArray(aiData.profile.advice) && aiData.profile.advice.length
@@ -1502,7 +1520,12 @@ function bars(items, opts) {
     return h(
       "div",
       { className: "swf-bar-row", key: (o.key || "bar") + "-" + i },
-      h("div", { className: "swf-bar-label", title: name }, h("span", { className: "swf-bar-name" }, name)),
+      h(
+        "div",
+        { className: "swf-bar-label", title: name },
+        o.rank !== false && i < 3 ? h("span", { className: "swf-rank-medal swf-rank-" + (i + 1) }, ["🥇", "🥈", "🥉"][i]) : null,
+        h("span", { className: "swf-bar-name" }, name),
+      ),
       h(
         "div",
         { className: "swf-bar-track" },
@@ -3544,7 +3567,7 @@ function WechatPanel({ api, locale }) {
 
     lines.push("", "约束：");
     aiJsonConstraints(dims, limits).forEach((x) => lines.push(x));
-    lines.push("除末尾这一个 json 块外，正文里**不要**出现任何 JSON 或代码块；json 块必须是**完整可解析**的对象，并且放在回答的最后。");
+    lines.push("除末尾这一个结构化数据块外，正文里**不要**出现任何 JSON 或代码块；数据块优先用 <<<AI_JSON>>> 与 <<<END>>> 包裹（也接受 ```json 围栏），必须是**完整可解析**的对象，并且放在回答的最后。");
 
     const extra = String(aiSettings.extra || "").trim();
     if (extra) {
@@ -3557,15 +3580,21 @@ function WechatPanel({ api, locale }) {
   const parseAiData = useCallback(
     (text) => {
       const src = String(text || "");
-      const m = src.match(/```json\s*([\s\S]*?)```/i);
-      if (!m) return null;
-      try {
-        const obj = JSON.parse(m[1].trim());
-        return obj && typeof obj === "object" ? obj : null;
-      } catch (err) {
-        log(api, "ai json parse failed: " + errText(err));
-        return null;
+      // ① 独有标记 <<<AI_JSON>>> … <<<END>>>  ② ```json 围栏  ③ 兜底：正文里捞最后一个可解析对象
+      const marker = src.match(/<<<AI_JSON>>>([\s\S]*?)<<<END>>>/i);
+      const fence = src.match(/```json\s*([\s\S]*?)```/i);
+      const raw = marker ? marker[1] : fence ? fence[1] : "";
+      if (raw) {
+        try {
+          const obj = JSON.parse(String(raw).trim());
+          if (obj && typeof obj === "object") return obj;
+        } catch (err) {
+          log(api, "ai json parse failed（改用正文兜底）: " + errText(err));
+        }
       }
+      const repaired = lastJsonObject(src);
+      if (repaired) log(api, "ai json 从正文兜底解析成功");
+      return repaired;
     },
     [api],
   );
