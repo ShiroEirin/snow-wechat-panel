@@ -366,7 +366,9 @@ function aiChartNodes(data) {
                 { className: "swf-risk", key: "ctr-" + i },
                 "• ",
                 String(x.topic || ""),
-                "（" + (Number(x.level) || 0) + "/5）",
+                " ",
+                "★".repeat(Math.max(0, Math.min(5, Number(x.level) || 0))) +
+                  "☆".repeat(Math.max(0, 5 - Math.max(0, Math.min(5, Number(x.level) || 0)))),
                 x.reason ? " — " + String(x.reason) : "",
               ),
             ),
@@ -394,7 +396,7 @@ function aiChartNodes(data) {
             aiData.quotes.map((x, i) =>
               h(
                 "div",
-                { className: "swf-todo", key: "quote-" + i },
+                { className: "swf-quote-card", key: "quote-" + i },
                 h("b", null, x.who || "?"),
                 "：",
                 String(x.text || ""),
@@ -5526,7 +5528,7 @@ function WechatPanel({ api, locale }) {
                   ),
                 ),
               ),
-              rows.map((m) => {
+              rows.map((m, i) => {
                 const uname = m.u || m.username || "";
                 const name = m.name || uname;
                 const av = (uname && avatars[uname]) || "";
@@ -5554,6 +5556,7 @@ function WechatPanel({ api, locale }) {
                   h(
                     "div",
                     { className: "swf-bar-label" },
+                    i < 3 ? h("span", { className: "swf-rank-medal" }, ["🥇", "🥈", "🥉"][i]) : null,
                     av
                       ? h("img", { className: "swf-bar-av", src: av, alt: "" })
                       : h("span", { className: "swf-bar-av", style: { background: speakerColor(name) } }, avatarChar(name)),

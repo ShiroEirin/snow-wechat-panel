@@ -1639,3 +1639,18 @@
 .swf-bar-row:nth-child(-n + 3) .swf-bar-name {
   font-weight: 600;
 }
+
+/* 金句引用卡：左侧竖线 + 轻微底色，跟随主题（不写死颜色） */
+.swf-quote-card {
+  position: relative;
+  margin: 6px 0;
+  padding: 9px 12px 9px 14px;
+  border-left: 3px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-radius: 8px;
+  background: var(--swf-bubble);
+  line-height: 1.75;
+}
+/* 争议指数星级 */
+.swf-risk {
+  letter-spacing: 0.2px;
+}
