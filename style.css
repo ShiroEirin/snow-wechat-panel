@@ -1654,3 +1654,22 @@
 .swf-risk {
   letter-spacing: 0.2px;
 }
+
+/* 群友称号卡（乐子版）：自适应网格，窄面板自动单列 */
+.swf-fun {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.swf-fun-card {
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  line-height: 1.35;
+}
+.swf-fun-ico { font-size: 17px; line-height: 1.1; }
+.swf-fun-title { font-size: 11px; opacity: 0.72; margin-top: 2px; }
+.swf-fun-who { font-size: 13px; font-weight: 600; margin-top: 1px; word-break: break-all; }
+.swf-fun-val { font-size: 11px; opacity: 0.6; font-variant-numeric: tabular-nums; }

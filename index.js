@@ -1509,6 +1509,42 @@ function fmtPct(v) {
   const n = Number(v);
   return Number.isFinite(n) ? (n * 100).toFixed(1) + "%" : "—";
 }
+/* 群友称号（乐子版）：member_leaders 的字段 → 图标 / 称号 / 单位 */
+const FUN_TITLES = [
+  ["messages", "💦", "水群王", "条"],
+  ["chars", "📢", "话痨之王", "字"],
+  ["bursts", "⚡", "连发狂魔", "连"],
+  ["emojis", "😂", "表情包发射器", "个"],
+  ["images", "🖼️", "斗图冠军", "张"],
+  ["videos", "📹", "视频UP主", "个"],
+  ["quoted", "🎯", "众矢之的", "次被引"],
+  ["quotes_given", "🔁", "引用狂魔", "次引用"],
+  ["night", "🌙", "深夜诗人", "条"],
+  ["early", "🌅", "早起冠军", "条"],
+  ["recall_like_events", "🫥", "撤回大师", "次"],
+];
+
+/** 从 member_leaders 取各维度冠军，拼成「群友称号」列表（值为 0 的维度跳过） */
+function funTitles(stats) {
+  const ml = (stats && stats.member_leaders) || {};
+  const out = [];
+  FUN_TITLES.forEach((row) => {
+    const key = row[0];
+    const arr = Array.isArray(ml[key]) ? ml[key] : [];
+    const top = arr[0];
+    if (!top || !(Number(top.value) > 0)) return;
+    out.push({
+      key: key,
+      icon: row[1],
+      title: row[2],
+      unit: row[3],
+      who: top.display_name || top.username || "?",
+      value: Number(top.value) || 0,
+    });
+  });
+  return out;
+}
+
 /* 横条榜：items = [{name, count, suffix}]；条长按最大值归一，opts.max 可覆盖分母 */
 function bars(items, opts) {
   const o = opts || {};
@@ -5488,6 +5524,49 @@ function WechatPanel({ api, locale }) {
             ),
           )
         : null,
+
+      // 群友称号（乐子版）：member_leaders 已给出各维度冠军，这里只做称号化展示
+      (() => {
+        const fun = funTitles(stats);
+        if (!fun.length) return null;
+        const sm = stats && stats.silent_members;
+        return h(
+          "div",
+          null,
+          h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "🎭"), "群友称号 · 乐子版"),
+          h(
+            "div",
+            { className: "swf-fun" },
+            fun.map((x) =>
+              h(
+                "div",
+                {
+                  className: "swf-fun-card",
+                  key: "fun-" + x.key,
+                  title: x.title + "：" + x.who + " " + x.value + " " + x.unit,
+                },
+                h("div", { className: "swf-fun-ico" }, x.icon),
+                h("div", { className: "swf-fun-title" }, x.title),
+                h("div", { className: "swf-fun-who" }, x.who),
+                h("div", { className: "swf-fun-val" }, fmtNum(x.value) + " " + x.unit),
+              ),
+            ),
+          ),
+          sm && sm.member_total
+            ? h(
+                "div",
+                { className: "swf-note" },
+                "全群 " +
+                  fmtNum(sm.member_total) +
+                  " 人，今天只有 " +
+                  fmtNum(sm.active_members) +
+                  " 人开口 —— 沉默率 " +
+                  fmtPct(1 - (Number(sm.active_rate) || 0)) +
+                  "。",
+              )
+            : null,
+        );
+      })(),
 
       // 成员榜：MCP 已返回全量多维聚合，这里只做维度切换与排序（不重复取数）
       stats && Array.isArray(stats.member_rank) && stats.member_rank.length
