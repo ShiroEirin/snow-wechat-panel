@@ -1,0 +1,1023 @@
+/* 微信群聊面板样式（微信风格 v0.7.0）
+   前缀 swf- 避免污染宿主。
+
+   ── 配色策略 ────────────────────────────────────────────────
+   1) 底座颜色一律走宿主的 CSS 设计 token，天然跟随明/暗主题：
+        --bg-primary --bg-secondary --text-primary --text-muted
+        --border-light --bg-hover --accent-blue --app-font-family
+      （宿主同时用 document.documentElement.dataset.theme === "dark" 切主题，
+        官方 file-explorer 插件即依赖这些 token，属公开可用契约。）
+   2) 微信专属品牌色（绿色）在两套主题下都成立，故直接写常量：
+        微信绿 #07c160 / 按压态 #06ad56 / 群昵称蓝 #576b95
+   3) 所有 token 先落到 .swf-root 上的 --swf-* 变量，规则只引用 --swf-*，
+      便于后续统一换肤。
+   4) 不使用 --vscode-*。 */
+
+.swf-root {
+  /* —— 主题底座（宿主 token + 兜底） —— */
+  --swf-bg: var(--bg-primary, #ffffff);
+  --swf-chat: var(--bg-secondary, #ededed);
+  --swf-bubble: var(--bg-primary, #ffffff);
+  --swf-text: var(--text-primary, #191919);
+  --swf-dim: var(--text-muted, #9a9a9a);
+  --swf-line: var(--border-light, rgba(128, 128, 128, 0.16));
+  --swf-hover: var(--bg-hover, rgba(128, 128, 128, 0.08));
+  --swf-active: var(--bg-active, rgba(128, 128, 128, 0.14));
+  --swf-mono: var(--font-mono, ui-monospace, Consolas, monospace);
+  --swf-sans: var(--app-font-family, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+
+  /* —— 微信品牌色 —— */
+  --swf-green: #07c160;
+  --swf-green-h: #06ad56;
+  --swf-green-bg: rgba(7, 193, 96, 0.12);
+  --swf-nick: #576b95;
+  --swf-amber: #fa9d3b;
+  --swf-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-family: var(--swf-sans);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--swf-text);
+  background: var(--swf-bg);
+  box-sizing: border-box;
+}
+.swf-root * {
+  box-sizing: border-box;
+}
+
+/* ---------- 顶部（微信「聊天信息」条风格） ---------- */
+.swf-top {
+  flex: 0 0 auto;
+  background: var(--swf-bg);
+  border-bottom: 1px solid var(--swf-line);
+}
+.swf-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.swf-top-row + .swf-top-row {
+  padding-top: 0;
+}
+.swf-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.swf-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 分段切换 → 微信底部导航式「下划线 tab」 */
+.swf-seg {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  background: transparent;
+}
+.swf-seg-btn {
+  padding: 6px 13px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--swf-dim);
+  opacity: 1;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.swf-seg-btn:hover {
+  color: var(--swf-text);
+}
+.swf-seg-on {
+  color: var(--swf-green);
+  border-bottom-color: var(--swf-green);
+  font-weight: 600;
+}
+
+.swf-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: var(--swf-dim);
+  background: var(--swf-active);
+}
+.swf-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--swf-green);
+}
+
+/* ---------- 控件 ---------- */
+.swf-select,
+.swf-input,
+.swf-date {
+  padding: 5px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--swf-line);
+  background: var(--swf-bubble);
+  color: var(--swf-text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+.swf-select:focus,
+.swf-input:focus,
+.swf-date:focus {
+  border-color: var(--swf-green);
+}
+.swf-select {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.swf-input {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+.swf-date {
+  flex: 0 0 auto;
+  width: 128px;
+}
+/* 控制行内的按钮：与输入框同高、单行、不被 flex 压缩 */
+.swf-ctrl .swf-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 11px;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.swf-btn {
+  padding: 5px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--swf-line);
+  background: var(--swf-bubble);
+  color: var(--swf-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.swf-btn:hover:not(:disabled) {
+  background: var(--swf-hover);
+}
+.swf-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* 主按钮 = 微信绿（发送按钮色） */
+.swf-btn-primary {
+  border-color: var(--swf-green);
+  background: var(--swf-green);
+  color: #fff;
+  font-weight: 500;
+}
+.swf-btn-primary:hover:not(:disabled) {
+  background: var(--swf-green-h);
+  border-color: var(--swf-green-h);
+}
+.swf-btn-sm {
+  padding: 3px 9px;
+  font-size: 11.5px;
+}
+
+/* 「同步」按钮：单行 + 旋转图标（与「查询 / 重置」同高） */
+.swf-sync-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  line-height: 1;
+}
+.swf-sync-ico {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.swf-syncing .swf-sync-ico {
+  animation: swf-spin 0.9s linear infinite;
+}
+.swf-sync-btn:disabled {
+  opacity: 1;
+  cursor: progress;
+  color: var(--swf-green);
+  border-color: var(--swf-green);
+}
+@keyframes swf-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.swf-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--swf-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.swf-toggle input {
+  accent-color: var(--swf-green);
+}
+
+/* ---------- 聊天内容区（微信浅灰底） ---------- */
+.swf-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 8px 24px;
+  background: var(--swf-chat);
+}
+
+/* 日期分隔 → 微信居中时间胶囊 */
+.swf-day {
+  width: fit-content;
+  max-width: 80%;
+  margin: 14px auto 10px;
+  padding: 2px 10px;
+  border-radius: 3px;
+  background: var(--swf-active);
+  color: var(--swf-dim);
+  font-size: 11px;
+  font-weight: 400;
+  text-align: center;
+}
+.swf-day::after {
+  content: none;
+}
+
+/* 消息行：头像列 + 内容列 */
+.swf-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 6px 4px;
+  border-radius: 4px;
+}
+.swf-msg:hover {
+  background: var(--swf-hover);
+}
+
+/* 头像 → 微信圆角方形（4px） */
+.swf-av {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  user-select: none;
+  overflow: hidden;
+}
+.swf-av-ghost {
+  background: transparent !important;
+}
+
+/* 真头像：撑满 34px 容器并按容器圆角裁剪（object-fit 保证非正方形头像不变形） */
+.swf-av-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.swf-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+/* 昵称行在气泡「外面」上方（微信群聊版式） */
+.swf-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 2px;
+  max-width: 100%;
+}
+.swf-sender {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--swf-dim);
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.swf-time {
+  color: var(--swf-dim);
+  opacity: 0.75;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.swf-tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--swf-active);
+  color: var(--swf-dim);
+  border: 0;
+}
+
+/* 气泡本体：内容列里除「昵称行 / 引用 / 图片 / 聊天记录卡片」以外的直接子元素 */
+.swf-main > *:not(.swf-head):not(.swf-quote):not(.swf-imgbox):not(.swf-recbox) {
+  position: relative;
+  max-width: 100%;
+  padding: 8px 11px;
+  border-radius: 5px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  word-break: break-word;
+}
+/* 气泡小尖角 */
+.swf-main > *:not(.swf-head):not(.swf-quote):not(.swf-imgbox):not(.swf-recbox)::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 11px;
+  border: 5px solid transparent;
+  border-right-color: var(--swf-bubble);
+}
+
+.swf-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.swf-link {
+  color: var(--swf-nick);
+  word-break: break-all;
+  text-decoration: none;
+}
+.swf-link:hover {
+  text-decoration: underline;
+}
+
+/* 同一人连续发言：折叠昵称行（微信里连续发言不重复昵称）。
+   ⚠️ 千万不要在 :hover 时再把它 display 出来 —— 那会改变行高，鼠标扫过时整段消息会「跳一下」。
+   需要确认发言人时，用消息行上的 title 提示（见 renderMsg）。 */
+.swf-msg-cont {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+.swf-msg-cont .swf-head {
+  display: none;
+}
+
+/* 聊天记录卡片：合并转发消息展开后逐条列出（图片 / 视频等只给文字占位）。
+   卡片自己是「盒子」不是气泡，所以走 .swf-recbox（已从气泡选择器里排除）。 */
+.swf-recbox {
+  max-width: 100%;
+  margin: 2px 0;
+}
+.swf-rec {
+  border: 1px solid var(--swf-line);
+  border-left: 3px solid var(--swf-nick);
+  border-radius: 5px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  overflow: hidden;
+}
+.swf-rec-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.swf-rec-head:hover {
+  background: var(--swf-hover);
+}
+.swf-rec-ico {
+  flex: 0 0 auto;
+  width: 10px;
+  color: var(--swf-dim);
+  font-size: 10px;
+}
+.swf-rec-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--swf-nick);
+}
+.swf-rec-n {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--swf-active);
+  color: var(--swf-dim);
+}
+.swf-rec-body {
+  border-top: 1px solid var(--swf-line);
+  padding: 4px 9px 7px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.swf-rec-item {
+  padding: 4px 0;
+}
+.swf-rec-item + .swf-rec-item {
+  border-top: 1px dashed var(--swf-line);
+}
+.swf-rec-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  margin-bottom: 1px;
+}
+.swf-rec-who {
+  font-weight: 600;
+}
+.swf-rec-time,
+.swf-rec-kind {
+  color: var(--swf-dim);
+  opacity: 0.8;
+}
+.swf-rec-kind {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--swf-active);
+}
+.swf-rec-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.swf-rec-hint {
+  padding: 4px 0;
+  color: var(--swf-dim);
+  font-size: 11px;
+}
+.swf-rec-err {
+  color: var(--swf-amber);
+}
+
+/* ---------- 状态 ---------- */
+.swf-empty {
+  padding: 32px 14px;
+  text-align: center;
+  color: var(--swf-dim);
+}
+.swf-error {
+  margin: 8px 2px;
+  padding: 8px 11px;
+  border-radius: 4px;
+  border-left: 3px solid var(--swf-amber);
+  background: rgba(250, 157, 59, 0.12);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 同步结果提示：贴在手/顶栏下方一行，成功绿、失败琥珀 */
+.swf-syncmsg {
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border-left: 3px solid var(--swf-green);
+  background: var(--swf-green-bg);
+  color: var(--swf-green);
+  font-family: var(--swf-sans);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.swf-syncmsg-err {
+  border-left-color: var(--swf-amber);
+  background: rgba(250, 157, 59, 0.12);
+  color: var(--swf-amber);
+}
+.swf-note {
+  color: var(--swf-dim);
+  font-size: 11px;
+  margin: 6px 4px;
+}
+.swf-code {
+  display: block;
+  margin: 4px 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--swf-active);
+  font-family: var(--swf-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---------- 依赖引导 ---------- */
+.swf-guide {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.swf-guide h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.swf-guide p {
+  margin: 0;
+  color: var(--swf-dim);
+}
+.swf-guide ol {
+  margin: 0;
+  padding-left: 19px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/* ---------- 统计 ---------- */
+.swf-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 7px;
+  margin: 4px 2px 2px;
+}
+.swf-card {
+  padding: 9px 11px;
+  border-radius: 6px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  border-left: 3px solid var(--swf-line);
+}
+.swf-card-accent {
+  border-left-color: var(--swf-green);
+}
+.swf-card-k {
+  font-size: 10.5px;
+  color: var(--swf-dim);
+}
+.swf-card-v {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+
+.swf-section {
+  margin: 18px 4px 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--swf-dim);
+}
+.swf-section::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--swf-line);
+}
+
+.swf-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  margin-bottom: 5px;
+}
+.swf-bar-label {
+  flex: 0 0 32%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.swf-bar-track {
+  flex: 1 1 auto;
+  height: 13px;
+  border-radius: 7px;
+  background: var(--swf-active);
+  overflow: hidden;
+}
+.swf-bar-fill {
+  height: 100%;
+  border-radius: 7px;
+}
+.swf-bar-num {
+  flex: 0 0 auto;
+  width: 40px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--swf-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.swf-hours {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 74px;
+  padding: 0 4px;
+}
+.swf-hour {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 3px;
+}
+.swf-hour-bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: var(--swf-green);
+  opacity: 0.85;
+}
+.swf-hour-k {
+  font-size: 9px;
+  color: var(--swf-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.swf-words {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 4px;
+}
+.swf-word {
+  padding: 2px 9px;
+  border-radius: 3px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  font-size: 11px;
+}
+.swf-word b {
+  color: var(--swf-green);
+  font-variant-numeric: tabular-nums;
+}
+
+.swf-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 0 4px;
+}
+.swf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 4px;
+  border-radius: 4px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  font-size: 11.5px;
+}
+.swf-chip-av {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+}
+.swf-chip-n {
+  color: var(--swf-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.swf-actions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 18px 4px 0;
+  padding-top: 13px;
+  border-top: 1px solid var(--swf-line);
+}
+
+/* ---------- MCP 工具台 ---------- */
+.swf-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 4px 2px;
+}
+.swf-tool {
+  border: 1px solid var(--swf-line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--swf-bubble);
+}
+.swf-tool-on {
+  border-color: var(--swf-green);
+}
+.swf-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.swf-tool-head:hover {
+  background: var(--swf-hover);
+}
+.swf-tool-name {
+  font-family: var(--swf-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.swf-tool-zh {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--swf-dim);
+  font-size: 11.5px;
+}
+.swf-tool-body {
+  padding: 0 10px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.swf-textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  padding: 8px 9px;
+  border-radius: 4px;
+  border: 1px solid var(--swf-line);
+  background: var(--swf-bg);
+  color: var(--swf-text);
+  font-family: var(--swf-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  outline: none;
+}
+.swf-textarea:focus {
+  border-color: var(--swf-green);
+}
+.swf-result {
+  max-height: 340px;
+  overflow: auto;
+  padding: 9px 10px;
+  border-radius: 4px;
+  background: var(--swf-active);
+  font-family: var(--swf-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.swf-pill {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: var(--swf-active);
+  color: var(--swf-dim);
+  border: 0;
+}
+.swf-pill-ok {
+  background: var(--swf-green-bg);
+  color: var(--swf-green);
+}
+.swf-pill-warn {
+  background: rgba(250, 157, 59, 0.16);
+  color: var(--swf-amber);
+}
+.swf-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+/* ---------- 系统消息（入群提示 / 撤回 / 群公告） ---------- */
+.swf-sys {
+  margin: 8px auto;
+  padding: 3px 12px;
+  max-width: 92%;
+  text-align: center;
+  font-size: 11px;
+  color: var(--swf-dim);
+  border-radius: 3px;
+  background: var(--swf-active);
+}
+
+/* ---------- 引用块（微信「引用」灰色小卡） ---------- */
+.swf-quote {
+  margin: 0;
+  padding: 5px 8px;
+  border-left: 2px solid var(--swf-line);
+  border-radius: 3px;
+  background: var(--swf-active);
+  font-size: 11.5px;
+  color: var(--swf-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+/* ---------- 结果表格 ---------- */
+.swf-tablewrap {
+  margin-top: 6px;
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid var(--swf-line);
+  border-radius: 4px;
+  background: var(--swf-bubble);
+}
+.swf-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+}
+.swf-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--swf-dim);
+  padding: 5px 8px;
+  white-space: nowrap;
+  background: var(--swf-active);
+  border-bottom: 1px solid var(--swf-line);
+}
+.swf-table td {
+  padding: 4px 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--swf-line);
+  word-break: break-word;
+}
+.swf-table tr:hover td {
+  background: var(--swf-hover);
+}
+
+/* ---------- 工具表单字段 ---------- */
+.swf-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 7px;
+}
+.swf-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.swf-field-label {
+  font-size: 10.5px;
+  color: var(--swf-dim);
+}
+.swf-field-input {
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--swf-line);
+  background: var(--swf-bg);
+  color: var(--swf-text);
+  font: inherit;
+  font-size: 11.5px;
+  outline: none;
+}
+.swf-field-input:focus {
+  border-color: var(--swf-green);
+}
+
+/* ============================ 图片渲染 ============================ */
+/* 微信里图片就是一块圆角图，不带外框；失败/占位才用浅底提示卡 */
+.swf-imgbox {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 0;
+  padding: 3px;
+  border-radius: 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  max-width: 100%;
+}
+.swf-imgbox-loading {
+  font-size: 11px;
+  color: var(--swf-dim);
+  background: var(--swf-active);
+  padding: 8px 11px;
+}
+.swf-imgbox-none {
+  font-size: 11px;
+  color: var(--swf-dim);
+  background: var(--swf-active);
+  padding: 8px 11px;
+}
+.swf-imgfail-ops {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+}
+.swf-imgbox-fail {
+  font-size: 11px;
+  padding: 8px 11px;
+  border-radius: 4px;
+  border-left: 3px solid var(--swf-amber);
+  background: rgba(250, 157, 59, 0.1);
+}
+.swf-imgfail-t {
+  font-weight: 600;
+  font-size: 11px;
+}
+.swf-imgfail-d {
+  color: var(--swf-dim);
+  font-size: 10.5px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.swf-img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  border-radius: 4px;
+  cursor: zoom-in;
+  background: var(--swf-active);
+}
+.swf-imgbox-compact {
+  margin-top: 0;
+  padding: 2px;
+}
+.swf-imgbox-compact .swf-img {
+  max-height: 72px;
+  max-width: 96px;
+  cursor: zoom-in;
+}
+.swf-imgbox-compact.swf-imgbox-loading,
+.swf-imgbox-compact.swf-imgbox-fail {
+  max-width: 110px;
+  font-size: 10px;
+}
+.swf-td-img {
+  white-space: normal !important;
+}
+.swf-path {
+  margin-top: 2px;
+  font-size: 9.5px;
+  color: var(--swf-dim);
+  word-break: break-all;
+}
+.swf-btn-mini {
+  padding: 2px 8px !important;
+  font-size: 10.5px !important;
+}

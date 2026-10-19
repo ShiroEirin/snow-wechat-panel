@@ -1,0 +1,34 @@
+{
+  "id": "com.shiroeirin.wechat-feed",
+  "name": {
+    "default": "WeChat Panel",
+    "zh-CN": "微信群聊",
+    "en": "WeChat Panel"
+  },
+  "description": {
+    "default": "WeChat group-chat feed, digest, and an MCP tool console — backed by the locally installed wechat MCP server (read-only).",
+    "zh-CN": "基于本机已安装的 wechat MCP 服务：微信群聊信息流、统计/总结，以及可直接调用的 MCP 工具台（只读）。"
+  },
+  "version": "0.11.2",
+  "author": "ShiroEirin",
+  "license": "MIT",
+  "icon": "lucide:MessageSquare",
+  "renderMode": "esm",
+  "entry": "index.js",
+  "styles": ["style.css"],
+  "panels": [
+    {
+      "id": "wechat",
+      "title": {
+        "default": "WeChat",
+        "zh-CN": "微信群聊"
+      },
+      "icon": "lucide:MessageSquare",
+      "widthHint": 560
+    }
+  ],
+  "privacy": {
+    "scopes": ["mcpSecrets", "conversations", "filesystem"],
+    "note": "通过 api.write 的 mcpTools.call 调用本机已安装的 wechat MCP 工具，只读读取本地微信消息索引用于渲染信息流与统计；图片消息与发言者头像由 MCP 解密 / 导出成本地图片文件后，经 filesystem 域用宿主 window.snow.readFileContent 读取并渲染为 data URL；「聊天记录」合并消息在展开时调用 MCP get_chat_record 取回该条消息的结构化条目（只读）；「同步微信数据」按钮会调用 MCP sync_wechat_database（先重新解密微信源库、再重建本地索引），是唯一的写操作；「AI 深度总结」会新建一个 Agent 会话并把总结任务交给它。不访问网络，不向微信发送任何消息。"
+  }
+}
