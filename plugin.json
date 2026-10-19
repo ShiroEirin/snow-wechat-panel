@@ -9,7 +9,7 @@
     "default": "WeChat group-chat feed, digest, and an MCP tool console — backed by the locally installed wechat MCP server (read-only).",
     "zh-CN": "基于本机已安装的 wechat MCP 服务：微信群聊信息流、统计/总结，以及可直接调用的 MCP 工具台（只读）。"
   },
-  "version": "0.11.2",
+  "version": "0.32.0",
   "author": "ShiroEirin",
   "license": "MIT",
   "icon": "lucide:MessageSquare",
@@ -28,7 +28,7 @@
     }
   ],
   "privacy": {
-    "scopes": ["mcpSecrets", "conversations", "filesystem"],
-    "note": "通过 api.write 的 mcpTools.call 调用本机已安装的 wechat MCP 工具，只读读取本地微信消息索引用于渲染信息流与统计；图片消息与发言者头像由 MCP 解密 / 导出成本地图片文件后，经 filesystem 域用宿主 window.snow.readFileContent 读取并渲染为 data URL；「聊天记录」合并消息在展开时调用 MCP get_chat_record 取回该条消息的结构化条目（只读）；「同步微信数据」按钮会调用 MCP sync_wechat_database（先重新解密微信源库、再重建本地索引），是唯一的写操作；「AI 深度总结」会新建一个 Agent 会话并把总结任务交给它。不访问网络，不向微信发送任何消息。"
+    "scopes": ["mcpSecrets", "conversations", "messages", "filesystem", "scheduledTasks"],
+    "note": "通过 api.write 的 mcpTools.call 调用本机已安装的 wechat MCP 工具，只读读取本地微信消息索引用于渲染信息流、统计与报告；图片消息与发言者头像由 MCP 解密 / 导出成本地图片文件后，经 filesystem 域用宿主 window.snow.readFileContent 读取并渲染为 data URL；「聊天记录」合并消息在展开时调用 MCP get_chat_record 取回该条消息的结构化条目（只读）；「同步微信数据」会调用 MCP start_sync 在后台重新解密源库并重建本地索引（写操作）；「深度分析」会新建一个 Agent 会话，并通过 messages 域读取该会话的回复以在面板内流式展示与解析结构化图表（只在用户点击后读取该会话）；「深挖」会依次新建最多 4 个阶段会话（各阶段内部由该阶段 Agent 用 sub-agents-activate 自行派发子代理并行取数与分析，子代理同样只读本机微信索引、不写文件），面板通过 messages 域读取这些会话的回复以展示阶段进度与最终报告，可随时中止（conversations.abort 会级联中止其子代理）；「报告」由 get_group_digest 的聚合数据本地拼成 Markdown，用户可复制到剪贴板、保存到当前项目（filesystem）、或通过内置文件阅读器打开；「定时日报」通过 scheduledTasks.create 在宿主创建每天执行的 AI Loop 任务（仅在用户点击「创建定时日报」时创建）。「查找成员」通过 MCP list_chatroom_members 读取群成员名单（只读），「成员画像」同样可导出为 Markdown / HTML 长图保存到当前项目（filesystem）。不访问网络，不向微信发送任何消息。"
   }
 }

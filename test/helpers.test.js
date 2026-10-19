@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, topWords, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -103,11 +103,7 @@ eq("普通文本", lib.classify("减少无用的token输出").tag, "文本");
 ok("isMedia([图片])", lib.isMedia("[图片]"));
 ok("!isMedia(普通文本)", !lib.isMedia("普通文本"));
 
-console.log("topWords / 其他");
-ok(
-  "高频片段含 测试",
-  lib.topWords(["测试测试测试", "测试文本"], 5).some((w) => w.word === "测试" && w.count >= 3),
-);
+console.log("其他");
 ok("speakerColor 稳定", lib.speakerColor("Moment") === lib.speakerColor("Moment"));
 ok("speakerColor 可区分", lib.speakerColor("Moment") !== lib.speakerColor("Chimney."));
 eq("fmtNum 257827", lib.fmtNum(257827), "257.8k");

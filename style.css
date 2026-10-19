@@ -149,9 +149,334 @@
   flex: 1 1 120px;
   min-width: 0;
 }
+/* 时间区间：起止日期 + 时刻做成一个整体控件（窄面板下不拆散） */
+.swf-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  border-radius: 8px;
+  border: 1px solid var(--swf-line);
+  background: rgba(128, 128, 128, 0.05);
+}
 .swf-date {
   flex: 0 0 auto;
-  width: 128px;
+  width: 112px;
+}
+.swf-time {
+  flex: 0 0 auto;
+  width: 62px;
+}
+/* 区间内部控件去掉自己的边框，靠外层容器统一外观 */
+.swf-range .swf-date,
+.swf-range .swf-time {
+  border: none;
+  background: transparent;
+  height: 24px;
+  padding: 0 3px;
+  border-radius: 5px;
+  box-shadow: none;
+}
+.swf-range .swf-date:focus,
+.swf-range .swf-time:focus {
+  background: var(--swf-bubble);
+  box-shadow: 0 0 0 1px var(--swf-green);
+}
+/* 去掉 time 的原生 spinner / 清除按钮，缩小日历图标 */
+.swf-time::-webkit-inner-spin-button,
+.swf-time::-webkit-outer-spin-button,
+.swf-time::-webkit-clear-button {
+  display: none;
+}
+.swf-time::-webkit-calendar-picker-indicator,
+.swf-date::-webkit-calendar-picker-indicator {
+  opacity: 0.45;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  margin-left: -2px;
+}
+.swf-range-sep {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.45;
+}
+/* 快捷预设 chips（今天 / 近 7 天 / 近 30 天） */
+.swf-presets {
+  display: inline-flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.swf-chipbtn {
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: rgba(128, 128, 128, 0.08);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+.swf-chipbtn:hover {
+  background: rgba(128, 128, 128, 0.16);
+  opacity: 1;
+}
+.swf-chipbtn-on {
+  border-color: var(--swf-green);
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--swf-green);
+  opacity: 1;
+  font-weight: 600;
+}
+/* 每小时图表的度量切换（消息数 / 活跃人数） */
+.swf-mini-seg {
+  display: inline-flex;
+  gap: 4px;
+  margin: 2px 0 6px;
+}
+.swf-mini-btn {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--swf-line);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.swf-mini-btn.active {
+  border-color: var(--swf-green);
+  color: var(--swf-green);
+  opacity: 1;
+}
+/* 24×7 活跃热力网格 */
+.swf-heat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.swf-heat-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.swf-heat-k {
+  flex: 0 0 auto;
+  width: 14px;
+  font-size: 10px;
+  text-align: center;
+  opacity: 0.75;
+}
+.swf-heat-cell {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.1);
+}
+/* 深度分析的结构化区块（Agent 输出的 topics / heat / todos / risks） */
+.swf-sub {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+.swf-todo,
+.swf-risk {
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 2px 6px;
+  margin: 2px 0;
+  border-left: 2px solid var(--swf-line);
+}
+.swf-risk {
+  border-left-color: #f59e0b;
+}
+/* AI 流式输出 */
+.swf-ai-out {
+  margin: 6px 0;
+  padding: 8px 10px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 6px;
+  border: 1px solid var(--swf-line);
+  background: var(--swf-bubble);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* AI 正文改走 Markdown 渲染：取消 pre-wrap，排版交给块级元素 */
+.swf-ai-md {
+  white-space: normal;
+  max-height: 560px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* ---------- 轻量 Markdown 渲染（AI 正文 / 报告预览共用） ---------- */
+.swf-md > *:first-child {
+  margin-top: 0;
+}
+.swf-md > *:last-child {
+  margin-bottom: 0;
+}
+.swf-md-h {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--swf-text);
+}
+.swf-md-h1 {
+  font-size: 16px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--swf-line);
+}
+.swf-md-h2 {
+  font-size: 14.5px;
+  padding-left: 8px;
+  border-left: 3px solid var(--swf-green);
+}
+.swf-md-h3 {
+  font-size: 13.5px;
+}
+.swf-md-h4,
+.swf-md-h5,
+.swf-md-h6 {
+  font-size: 12.5px;
+  color: var(--swf-dim);
+}
+.swf-md-p {
+  margin: 6px 0;
+}
+.swf-md-list {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.swf-md-list li {
+  margin: 3px 0;
+}
+.swf-md-quote {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--swf-line);
+  background: var(--swf-active);
+  border-radius: 4px;
+  color: var(--swf-dim);
+  white-space: pre-wrap;
+}
+/* ---------- Callout 与导语：AI 只写 > [!TIP] 语义，样式全在这里 ---------- */
+.swf-md-callout {
+  margin: 8px 0;
+  padding: 8px 11px;
+  border-radius: 6px;
+  border-left: 3px solid var(--swf-line);
+  background: var(--swf-active);
+}
+.swf-md-callout-h {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 3px;
+}
+.swf-md-callout-b {
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.swf-md-callout-tip {
+  border-left-color: var(--swf-green);
+  background: var(--swf-green-bg);
+}
+.swf-md-callout-info {
+  border-left-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.1);
+}
+.swf-md-callout-success {
+  border-left-color: #0d9488;
+  background: rgba(13, 148, 136, 0.1);
+}
+.swf-md-callout-quote {
+  border-left-color: #7c3aed;
+  background: rgba(124, 58, 237, 0.09);
+}
+.swf-md-callout-warn {
+  border-left-color: var(--swf-amber);
+  background: rgba(250, 157, 59, 0.13);
+}
+.swf-md-callout-danger {
+  border-left-color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+.swf-lead {
+  margin: 6px 4px 10px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  border-left: 3px solid var(--swf-green);
+  background: var(--swf-green-bg);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.swf-md-code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--swf-active);
+  font-family: var(--swf-mono);
+  font-size: 11.5px;
+}
+.swf-md-pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--swf-line);
+  background: var(--swf-active);
+  overflow: auto;
+  max-height: 320px;
+}
+.swf-md-pre code {
+  font-family: var(--swf-mono);
+  font-size: 11.5px;
+  white-space: pre;
+}
+.swf-md-lang {
+  margin-bottom: 4px;
+  font-size: 10.5px;
+  color: var(--swf-dim);
+  text-transform: uppercase;
+}
+.swf-md-hr {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--swf-line);
+}
+.swf-md-table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11.5px;
+}
+.swf-md-table th,
+.swf-md-table td {
+  padding: 4px 8px;
+  border: 1px solid var(--swf-line);
+  text-align: left;
+}
+.swf-md-table th {
+  background: var(--swf-active);
+  font-weight: 600;
+}
+.swf-md-link {
+  color: var(--swf-nick);
+  text-decoration: none;
+}
+.swf-md-link:hover {
+  text-decoration: underline;
 }
 /* 控制行内的按钮：与输入框同高、单行、不被 flex 压缩 */
 .swf-ctrl .swf-btn {
@@ -526,6 +851,41 @@
   font-size: 11px;
   line-height: 1.5;
   word-break: break-all;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.swf-syncmsg-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 失败 / 超时提示的关闭按钮（成功与同步中不出现） */
+.swf-syncmsg-x {
+  flex: 0 0 auto;
+  margin: -2px -4px 0 0;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  opacity: 0.65;
+}
+.swf-syncmsg-x:hover {
+  opacity: 1;
+}
+/* 成功提示 3 秒后淡出（与 index.js 的 SYNC_OK_FADE_MS 对齐） */
+.swf-syncmsg-ok {
+  animation: swf-sync-fade 3s forwards;
+}
+@keyframes swf-sync-fade {
+  0%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 .swf-syncmsg-err {
   border-left-color: var(--swf-amber);
@@ -600,6 +960,66 @@
   font-variant-numeric: tabular-nums;
   line-height: 1.35;
 }
+/* 指标卡第二行小字（分母 / 口径说明） */
+.swf-card-sub {
+  margin-top: 2px;
+  font-size: 10px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+/* 输入范围已变更、画面仍是旧统计时的提示条 */
+.swf-stale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 4px 0;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.10);
+  font-size: 11px;
+}
+.swf-stale > .swf-mini-btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+/* AI 分析设置：维度开关 / 数量上限 / 自定义补充指令 */
+.swf-adv {
+  margin: 10px 4px 4px;
+  font-size: 11px;
+}
+.swf-adv > summary {
+  cursor: pointer;
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+.swf-adv-limits {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.swf-adv-limits > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.swf-num {
+  width: 52px;
+}
+.swf-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--swf-line);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  resize: vertical;
+}
 
 .swf-section {
   margin: 18px 4px 9px;
@@ -616,7 +1036,30 @@
   height: 1px;
   background: var(--swf-line);
 }
+/* 成员画像标题行：右侧放显式「收起」入口（成员榜同一行再点也可收起） */
+.swf-section-head::after {
+  display: none;
+}
+.swf-section-head > .swf-mini-btn {
+  margin-left: auto;
+  opacity: 1;
+}
+.swf-section-head > .swf-mini-btn:hover {
+  border-color: var(--swf-green);
+  color: var(--swf-green);
+}
 
+/* 信息流顶部「加载更早」条（微信式：最新在底部，向上翻更早） */
+.swf-morebar {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 8px;
+}
+.swf-morehint {
+  font-size: 11px;
+  opacity: 0.55;
+  padding: 4px 0;
+}
 .swf-bar-row {
   display: flex;
   align-items: center;
@@ -625,12 +1068,30 @@
   margin-bottom: 5px;
 }
 .swf-bar-label {
-  flex: 0 0 32%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 34%;
   min-width: 0;
+  font-size: 11.5px;
+}
+.swf-bar-av {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  color: #fff;
+}
+.swf-bar-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
 }
 .swf-bar-track {
   flex: 1 1 auto;
@@ -650,6 +1111,10 @@
   font-size: 11px;
   color: var(--swf-dim);
   font-variant-numeric: tabular-nums;
+}
+/* 数值后面还要带占比（如「159 · 53.7%」）时放宽数值列 */
+.swf-bar-num-wide {
+  width: 82px;
 }
 
 .swf-hours {
@@ -726,6 +1191,9 @@
   font-size: 10px;
   font-weight: 600;
   color: #fff;
+}
+.swf-chip-av-img {
+  object-fit: cover;
 }
 .swf-chip-n {
   color: var(--swf-dim);
@@ -869,6 +1337,30 @@
   max-width: 100%;
 }
 
+/* 引用块可点击：定位原消息 */
+.swf-quote-click {
+  cursor: pointer;
+}
+.swf-quote-click:hover {
+  background: var(--swf-line);
+  color: var(--swf-text);
+}
+
+/* 引用跳转命中：短暂高亮目标消息（动画优先级高于 .swf-msg:hover） */
+.swf-hl {
+  animation: swf-hl-flash 1.8s ease-out;
+}
+@keyframes swf-hl-flash {
+  0%,
+  35% {
+    background: var(--swf-active);
+    box-shadow: inset 2px 0 0 var(--swf-accent, #3b82f6);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
 /* ---------- 结果表格 ---------- */
 .swf-tablewrap {
   margin-top: 6px;
@@ -1008,6 +1500,23 @@
   max-width: 110px;
   font-size: 10px;
 }
+/* 表情图（微信自定义表情 / 表情包）：本地表情库里没有明文时，由 .swf-emo-txt
+   显示 [表情] 文本兜底（历史消息的表情常被微信清理，属正常情况）。 */
+.swf-emo {
+  display: block;
+  max-width: 180px;
+  max-height: 180px;
+  width: auto;
+  height: auto;
+  border-radius: 4px;
+  cursor: zoom-in;
+  background: transparent;
+}
+.swf-emo-txt {
+  display: inline-block;
+  color: var(--swf-muted, #888);
+  font-size: 12px;
+}
 .swf-td-img {
   white-space: normal !important;
 }
@@ -1020,4 +1529,94 @@
 .swf-btn-mini {
   padding: 2px 8px !important;
   font-size: 10.5px !important;
+}
+
+/* ---------- 扩展统计：成员榜 / 互动网络 / 成员画像 ---------- */
+.swf-mini-wrap {
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 4px 8px;
+}
+.swf-rank-row {
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+.swf-rank-row:hover {
+  background: rgba(128, 128, 128, 0.08);
+}
+.swf-rank-row-on {
+  background: rgba(59, 130, 246, 0.14);
+  box-shadow: inset 2px 0 0 var(--swf-green);
+}
+
+/* ---------- AI 情绪曲线 ---------- */
+.swf-senti {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 110px;
+  padding: 4px 4px 0;
+  border-bottom: 1px solid var(--swf-line);
+}
+.swf-senti-col {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 3px;
+}
+.swf-senti-bar {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+}
+.swf-senti-k {
+  font-size: 9px;
+  color: var(--swf-dim);
+  white-space: nowrap;
+}
+
+/* ---------- 深挖流水线：阶段进度与子代理进度标记 ---------- */
+.swf-deep {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 4px;
+}
+.swf-deep-step {
+  border: 1px solid var(--swf-line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--swf-hover);
+}
+.swf-deep-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.swf-deep-idx {
+  font-variant-numeric: tabular-nums;
+  color: var(--swf-dim);
+  font-size: 11px;
+}
+.swf-deep-label {
+  font-weight: 600;
+}
+.swf-deep-detail {
+  color: var(--swf-dim);
+  font-size: 11px;
+}
+.swf-deep-chars {
+  margin-left: auto;
+  color: var(--swf-dim);
+  font-size: 11px;
+}
+.swf-deep-marks {
+  margin: 6px 0 2px;
+  padding-left: 2px;
+  border-left: 2px solid var(--swf-line);
 }

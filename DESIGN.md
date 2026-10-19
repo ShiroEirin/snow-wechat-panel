@@ -122,14 +122,16 @@ const r = await api.write.run("conversations.create", {
 api.metadata.subscribe("messages", { params: { conversationId: r.data.conversationId } }, (payload) => { /* ... */ });
 ```
 
-- 流式渲染：thinking 折叠、`toolCallsJson` 显示成「正在调用 …」
-- 落库：`memos.create`；定时：`scheduledTasks.create` + `runNow`；完成通知：`system.notify`；跳转：`conversations.activate`
+- 流式渲染：thinking 折叠、`toolCallsJson` 显示成「正在调用工具…」
+- **结构化图表（v0.14.0）**：提示词要求 Agent 在 Markdown 正文之后追加**一个** `json` 代码块（`topics` / `heat_hours` / `todos` / `risks`）；面板用 ```` ```json ```` 正则提取并 `JSON.parse`，成功则渲染话题条形图、Agent 热度条、待办与风险卡片，失败则只展示 Markdown（不报错）
+- **本地词频退场（v0.14.0）**：删除面板侧的 2-gram「高频片段」——语义类指标交给 Agent；本地只保留 SQL 能全量算准的确定性指标（发言人数 / 每小时活跃 / 参与度分桶 / 类型分布 / 24×7 热力）
+- 落盘：`filesystem.writeFile`（导出 MD / HTML 长图，v0.31.0 起「存备忘录」出口已移除）；定时：`scheduledTasks.create` + `runNow`；完成通知：`system.notify`；跳转：`conversations.activate`
 
 ### 3.3 MCP 工具台视图（`mcp`）—— 让 MCP 能力在面板里可见、可操作
 
 这是 v0.4.0 新增的视图，解决「插件装了 MCP，但用户看不到 MCP 到底能干什么」的问题。
 
-- **工具目录**：`TOOLS` 常量内联 20 个 wechat 工具（`name` / 中文用途 / 默认参数），保证即使读不到宿主的工具清单也能用。
+- **工具目录**：`TOOLS` 常量内联 28 个 wechat 工具（`name` / 中文用途 / 默认参数），保证即使读不到宿主的工具清单也能用。
 - **参数预填**：展开某工具时，按当前选中的群与日期预填 `session_id` / `chatroom_id` / `start` / `end` / `date`，用户可手改 JSON。
 - **调用与展示**：走同一条 `mcpTools.call` 通路；结果显示 `ok|失败`、耗时 ms、返回条数，以及完整返回体（可滚动 `pre`）。
 - **写操作护栏**：`sync_wechat_database`（面板显示名「同步微信数据」，默认 `redecrypt: true`）标记 `dangerous`，按钮首次点击只进入「确认执行」态，第二次点击才真正提交。
@@ -214,6 +216,23 @@ get_message_image(message_id: int, include_base64: bool = False)
 
 **「打开原文件」走 `panels.openFile`**：`api.write.run("panels.openFile", { filePath })`，`scope: null`，**必须绝对路径**（`/^(?:[a-zA-Z]:[\\/]|\/|\\\\)/`），不接受 `\0`。
 
+## 3.x 总结与报告：三层分工（v0.17.0）
+
+面板**只有一个** `digest` 视图，不再把「总结」和「报告」拆成两个标签页：
+
+| 层 | 负责 | 具体 |
+|---|---|---|
+| MCP（通用数据层） | 全量聚合、结构化返回 | `get_chat_activity_stats` 扩展字段、`get_group_digest`、`get_member_profile` |
+| 面板（展示层） | 报告类型、趋势粒度、图表、Markdown 拼装 | 日/周/月/年/自定义 → 时间窗；趋势按类型切小时/天/月；成员榜、互动网络、成员画像、报告预览 |
+| Snow App（平台层） | 落盘与宿主能力 | `filesystem.writeFile`、`panels.openFile`、`system.writeClipboardText`、`conversations.create` + `messages` |
+
+铁律：
+
+- MCP 不返回展示文案、不猜称号、不耦合面板；称号 / 情感 / 争议由 Agent 或面板派生。
+- MCP 只接受 `start` / `end`，**不认识「日报/周报」**；时间窗与趋势粒度是面板语义。
+- 面板不重复实现 MCP 已有的聚合；点击成员才按需调 `get_member_profile`。
+- 报告只拼装当前 `stats` + `aiData` / `aiText`，不引入第二套统计口径。
+
 ## 4. 开发避雷点（⚠️ 必读）
 
 ### 4.1 打包与入口
@@ -269,9 +288,9 @@ get_message_image(message_id: int, include_base64: bool = False)
 | **P3.6** | 信息流排版重做（头像列 + 同人连续消息折叠 + 卡片化统计）+ **MCP 工具台视图** | ✅ 已实现（v0.4.0） |
 | **P3.7** | 发言者**真头像**（`get_user_avatars` 批量）+ 图片**直出**（去点击）+ 顶栏**手动同步**按钮 | ✅ 已实现（v0.10.0） |
 | **P3.8** | 修 `runSync` 的 hooks 顺序崩溃（`useCallback` 落在提前 `return` 之后 → React #310 白屏） | ✅ 已修复（v0.10.1） |
-| P4 | AI 深总结的**流式渲染**：`api.metadata.subscribe("messages", ...)` 把 Agent 回复实时画进面板（当前是「创建会话 + 跳转」） | 待开发 |
+| P4 | AI 深总结的**流式渲染**：`api.metadata.subscribe("messages", ...)` 把 Agent 回复实时画进面板，并支持 `filesystem.writeFile` 导出 MD | ✅ 已实现（v0.12.0） |
 | P5 | 引用消息胶囊跳原文；媒体项点击 `panels.openFile` 打开本地文件；`offset` 无限滚动 | 待开发 |
-| P6 | 落库 `memos.create` / 定时 `scheduledTasks.create` + `runNow` / 完成通知 `system.notify`；i18n（`locales/`）；可选上架插件市场 | 待开发 |
+| P6 | 定时任务 `scheduledTasks.create` + `runNow` ✅ 已实现（v0.23.0）；i18n（`locales/`）评估后不做（主控件双语骨架已覆盖，数据标签与报告正文保持中文）；`system.notify` 因宿主签名未确认不做（改用面板内状态条）；「存备忘录」出口 v0.31.0 已移除（宿主备忘录不渲染 Markdown，与导出 MD / HTML 长图重复）；插件市场上架 | 部分实现 |
 
 ---
 
