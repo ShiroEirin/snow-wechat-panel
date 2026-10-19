@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -100,8 +100,24 @@ eq("[动画表情]", lib.classify("[动画表情]").tag, "表情");
 eq("短括号 = 表情", lib.classify("[皱眉]").tag, "表情");
 eq("URL = 链接", lib.classify("看这个 https://github.com/a/b").tag, "链接");
 eq("普通文本", lib.classify("减少无用的token输出").tag, "文本");
+eq("引用图片 ≠ 图片", lib.classify("[引用: [图片]] openai好强").tag, "文本");
+eq("引用里的 [视频] 也不算", lib.classify("[引用: 谁: [视频]] 哈哈哈").tag, "文本");
+eq("正文才是图片", lib.classify("[引用: 谁: 你好] [图片]").tag, "图片");
+eq("引用前缀不影响正文链接", lib.classify("[引用: 谁: 你好] 看 https://a.b").tag, "链接");
 ok("isMedia([图片])", lib.isMedia("[图片]"));
+ok("isMedia(引用图片) = false", lib.isMedia("[引用: [图片]] openai好强") === false);
 ok("!isMedia(普通文本)", !lib.isMedia("普通文本"));
+
+console.log("readAiMessage");
+const aiMsg = (content, status) =>
+  lib.readAiMessage({ items: [{ role: "assistant", content: content, status: status || "" }] });
+ok("没有 assistant 消息 -> null", lib.readAiMessage({ items: [] }) === null);
+ok("裸 JSON 也算完成", aiMsg('{"risks":[],"quotes":[]}').done === true);
+ok("截断的 JSON 不算完成", aiMsg('{"risks":[{"topic":"a"').done === false);
+ok("围栏 JSON 算完成", aiMsg('```json{"a":1}```').done === true);
+ok("状态白名单算完成", aiMsg("随便写点", "done").done === true);
+ok("空正文不算完成", aiMsg("", "").done === false);
+ok("只有工具调用 -> toolPending", lib.readAiMessage({ items: [{ role: "assistant", content: "", toolCallsJson: "[]" }] }).toolPending === true);
 
 console.log("其他");
 ok("speakerColor 稳定", lib.speakerColor("Moment") === lib.speakerColor("Moment"));

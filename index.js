@@ -93,6 +93,22 @@ const DEEP_RECOMMEND = { shortHours: 3, busyMessages: 800 };
 // 进度标记：阶段内并行子代理完成一个就报一行，面板据此更新进度
 const DEEP_PROGRESS_RE = /\[PROGRESS\]\s*(.+)/g;
 
+/** 正文里是否已经有「完整可解析」的 JSON 对象。
+    Agent 经常直接吐裸 JSON（没有 ``` 围栏），只认围栏会让面板一直停在「生成中」，
+    直到 10 分钟超时才收敛 —— 所以这里补一条：整段能 JSON.parse 出来就算完成。 */
+function hasCompleteJson(text) {
+  const t = String(text || "");
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
+  if (start < 0 || end <= start + 1) return false;
+  try {
+    const v = JSON.parse(t.slice(start, end + 1));
+    return !!v && typeof v === "object";
+  } catch (err) {
+    return false;
+  }
+}
+
 /** 从 messages 域载荷里读出「最后一条 assistant 消息」的正文与完成状态。
     单轮深度分析与深挖流水线共用，避免两处完成判定分叉。 */
 function readAiMessage(data) {
@@ -108,8 +124,10 @@ function readAiMessage(data) {
     status: status,
     // 有 toolCallsJson 但正文还空 = Agent 正在调工具（区别于「什么都没开始」）
     toolPending: !text && !!last.toolCallsJson,
-    // 完成判定沿用旧口径：状态白名单命中，或正文已带完整 json 块
-    done: !!text && (AI_DONE_STATUSES.indexOf(status) >= 0 || /```json[\s\S]*?```/i.test(text)),
+    // 完成判定：状态白名单命中，或正文已带 ```json 围栏，或正文本身就是完整 JSON
+    done: !!text && (AI_DONE_STATUSES.indexOf(status) >= 0 ||
+      /```json[\s\S]*?```/i.test(text) ||
+      hasCompleteJson(text)),
   };
 }
 
@@ -1386,14 +1404,19 @@ function squashText(v) {
 function classify(content) {
   const c = String(content === undefined || content === null ? "" : content);
   if (c.indexOf("<sysmsg") >= 0) return { tag: "系统", text: c };
-  if (c.indexOf("[图片]") >= 0 || c.indexOf("[照片]") >= 0) return { tag: "图片", text: c };
-  if (c.indexOf("[视频]") >= 0) return { tag: "视频", text: c };
-  if (c.indexOf("[文件]") >= 0 || c.indexOf("[文档]") >= 0) return { tag: "文件", text: c };
-  if (c.indexOf("[语音]") >= 0) return { tag: "语音", text: c };
-  if (c.indexOf("[动画表情]") >= 0) return { tag: "表情", text: c };
-  if (c.indexOf("[聊天记录]") >= 0) return { tag: "聊天记录", text: c };
-  if (c.indexOf("http://") >= 0 || c.indexOf("https://") >= 0) return { tag: "链接", text: c };
-  if (c.length > 0 && c.length <= 12 && c.charAt(0) === "[" && c.charAt(c.length - 1) === "]") {
+  // 引用消息的 tag 只看**正文**：`[引用: [图片]] 正文` 本身是文本消息，
+  // 不能被引用块里的 [图片] 带偏 —— 否则面板会把它当图片去调 get_message_image，
+  // 那条消息根本没有图片元数据，于是弹出「图片未解密 / 重试」。
+  const q = splitQuote(c);
+  const b = q ? q.body : c;
+  if (b.indexOf("[图片]") >= 0 || b.indexOf("[照片]") >= 0) return { tag: "图片", text: c };
+  if (b.indexOf("[视频]") >= 0) return { tag: "视频", text: c };
+  if (b.indexOf("[文件]") >= 0 || b.indexOf("[文档]") >= 0) return { tag: "文件", text: c };
+  if (b.indexOf("[语音]") >= 0) return { tag: "语音", text: c };
+  if (b.indexOf("[动画表情]") >= 0) return { tag: "表情", text: c };
+  if (b.indexOf("[聊天记录]") >= 0) return { tag: "聊天记录", text: c };
+  if (b.indexOf("http://") >= 0 || b.indexOf("https://") >= 0) return { tag: "链接", text: c };
+  if (b.length > 0 && b.length <= 12 && b.charAt(0) === "[" && b.charAt(b.length - 1) === "]") {
     return { tag: "表情", text: c };
   }
   return { tag: "文本", text: c };
