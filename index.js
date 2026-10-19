@@ -23,9 +23,6 @@ const ACCENT = "#3b82f6";
 // 深度分析：assistant 消息视为「已完成」的状态白名单；轮询兜底的超时上限
 const AI_DONE_STATUSES = ["done", "completed", "complete", "finished", "success", "succeeded", "idle", "error", "failed"];
 const AI_POLL_TIMEOUT_MS = 10 * 60 * 1000;
-// 同步轮询上限：15 分钟仍无结果就明确收口。
-// 不设上限的话，一旦 MCP 侧后台线程异常且没写 state，面板会永远停在「同步中」。
-const SYNC_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 // 同步成功的提示 3 秒后淡出（与 style.css 的 .swf-syncmsg-ok 动画时长对齐）
 const SYNC_OK_FADE_MS = 3000;
 // 成员检索结果分页：MCP 的 list_chatroom_members 没有 offset（服务端分页不存在），
@@ -2828,15 +2825,6 @@ function WechatPanel({ api, locale }) {
   // 当前阶段的会话 id：中止时用它调 conversations.abort（会级联中止其子代理）
   const deepConvRef = useRef("");
   const deepUnsubRef = useRef(null);
-  // 同步轮询必须定义在组件顶部：卸载清理 effect 与 runSync 都会引用它，
-  // 放到组件中段会让依赖数组在渲染期读到未初始化的绑定（TDZ）。
-  const syncPollRef = useRef(null);
-  const stopSyncPoll = useCallback(() => {
-    if (syncPollRef.current) {
-      clearInterval(syncPollRef.current);
-      syncPollRef.current = null;
-    }
-  }, []);
 
   // 流式读取的轮询定时器也必须放在顶部：startPoll / 卸载清理 / 收起画像都会引用
   const stopPoll = useCallback(() => {
@@ -4624,9 +4612,8 @@ function WechatPanel({ api, locale }) {
       }
       aiUnsubRef.current = null;
       stopPoll();
-      stopSyncPoll();
     },
-    [stopPoll, stopSyncPoll],
+    [stopPoll],
   );
 
   /* ---- MCP 能力 ---- */
@@ -4849,106 +4836,51 @@ function WechatPanel({ api, locale }) {
     log(api, "filters reset");
   }, [api]);
 
-  /* ---- 手动同步：优先「后台执行 + 轮询状态」----
-     宿主对单次 MCP 工具调用有 120s 硬超时，而完整同步（重新解密 + 重建索引）在
-     快照接近 1GB 时可能超过它 —— 超时被中断还会写坏解密快照。因此默认走 start_sync
-     后台线程，再轮询 get_auto_sync_status 拿结果。 */
+  /* ---- 手动同步：阻塞执行（单一路径）----
+     实测全量同步约 72s（解密 ~6s + ETL ~66s），在宿主 120s 上限内。
+     曾用 start_sync + 轮询状态，但短连接宿主会在 MCP 进程退出时终止后台进程，
+     状态文件永不更新 → 按钮永远停在「同步中」；改用阻塞调用后失败立刻可见。 */
   const runSync = useCallback(async () => {
     setSyncing(true);
     setSyncMsg(null);
-    stopSyncPoll();
     try {
-      let baseline = 0;
-      // 同时记录基线时间戳：完成判定「run_count 增加」或「last_run.at 变化」任一成立，
-      // 只认 run_count 不够健壮 —— 旧版 MCP 在后台线程抛异常时不写 state，调用方会永远等不到。
-      let baselineAt = 0;
-      try {
-        const st0 = unwrapMcp(await callToolRaw(api, "get_auto_sync_status", {}));
-        baseline = Number((st0 && st0.run_count) || 0);
-        baselineAt = Number((st0 && st0.last_run && st0.last_run.at) || 0);
-      } catch (err) {
-        /* 读不到基线就当 0 */
-      }
-      const raw = await callToolRaw(api, "start_sync", { redecrypt: true });
-      const r = unwrapMcp(raw);
-      if (!r || (r.started !== true && r.already_running !== true)) {
-        throw new Error((r && r.error) || "start_sync 未启动（可能 MCP 版本过旧）");
-      }
-      const already = r.already_running === true;
+      // 阻塞同步：宿主对单次 MCP 调用上限约 120s，本机全量同步实测约 72s
+      //（解密 ~6s + ETL ~66s）。此前走 start_sync + 轮询的分离进程方案，在短连接
+      // 宿主上会随 MCP 进程退出被终止 —— 状态文件永不更新，按钮永远停在「同步中」。
+      // 这里直接用阻塞版本：只有一条路径，失败立刻可见。
       setSyncMsg({
         ok: true,
-        text:
-          (t.syncing || "同步中…") +
-          (already
-            ? "：已有同步在运行（已跑 " + Math.round(Number(r.elapsed_seconds) || 0) + "s），继续等它完成…"
-            : "：重新解密 + 重建索引，通常 1–3 分钟…"),
+        text: (t.syncing || "同步中…") + "：重新解密 + 重建索引，通常 1–3 分钟…",
       });
-      const startedAt = Date.now();
-      syncPollRef.current = setInterval(async () => {
-        try {
-          // 超时收口：否则一旦 MCP 侧卡死，面板会永远停在「同步中」
-          if (Date.now() - startedAt > SYNC_POLL_TIMEOUT_MS) {
-            stopSyncPoll();
-            setSyncing(false);
-            setSyncMsg({
-              ok: false,
-              text: "同步超时：15 分钟没有返回结果。可到 MCP 工具台调 get_auto_sync_status 查看，或重启 Snow App 后重试。",
-            });
-            return;
-          }
-          const st = unwrapMcp(await callToolRaw(api, "get_auto_sync_status", {}));
-          const count = Number((st && st.run_count) || 0);
-          const last = st && st.last_run;
-          const at = Number((last && last.at) || 0);
-          if (st && st.syncing === false && last && (count > baseline || at > baselineAt)) {
-            stopSyncPoll();
-            const result = last.result || {};
-            const etl = result.etl_step || {};
-            const decrypt = result.decrypt_step || {};
-            const ok = !!last.ok;
-            setSyncMsg({
-              ok: ok,
-              text: ok
-                ? t.syncOk + " · " + fmtNum(etl.messages || 0) + " " + t.total + (decrypt.seconds ? " · 解密 " + decrypt.seconds + "s" : "")
-                : t.syncFail + "：" + String(decrypt.error || etl.reason || "未知原因").slice(0, 200),
-            });
-            log(api, "sync done -> " + preview(result, 300));
-            setSyncing(false);
-            if (ok) {
-              setSessionsNonce((n) => n + 1);
-              if (sessionId) await loadFeed();
-            }
-          }
-        } catch (err) {
-          /* 单次查询失败：继续等下一轮 */
-        }
-      }, 3000);
-      return;
-    } catch (err) {
-      // 回退：旧版 MCP 没有 start_sync → 走阻塞版本（可能触发宿主 120s 超时）
-      log(api, "start_sync 不可用，回退阻塞同步：" + errText(err));
-      try {
-        const raw = await callToolRaw(api, "sync_wechat_database", { redecrypt: true });
-        const r = unwrapMcp(raw);
-        if (r && r.ok === false) {
-          const why = ((r.decrypt_step || {}).error) || (r.etl_step && r.etl_step.reason) || "未知原因";
-          setSyncMsg({ ok: false, text: t.syncFail + "：" + String(why).slice(0, 240) });
-        } else {
-          const etl = (r && r.etl_step) || {};
-          const secs = ((r && r.decrypt_step) || {}).seconds;
-          setSyncMsg({
-            ok: true,
-            text: t.syncOk + " · " + fmtNum(etl.messages || 0) + " " + t.total + (secs ? " · 解密 " + secs + "s" : ""),
-          });
-          setSessionsNonce((n) => n + 1);
-          if (sessionId) await loadFeed();
-        }
-      } catch (err2) {
-        setSyncMsg({ ok: false, text: t.syncFail + "：" + errText(err2) });
+      const raw = await callToolRaw(api, "sync_wechat_database", { redecrypt: true });
+      const r = unwrapMcp(raw) || {};
+      const ok = r.ok !== false;
+      const etl = r.etl_step || {};
+      const decrypt = r.decrypt_step || {};
+      if (!ok) {
+        const why = decrypt.error || etl.reason || r.error || "未知原因";
+        setSyncMsg({ ok: false, text: t.syncFail + "：" + String(why).slice(0, 240) });
+      } else {
+        setSyncMsg({
+          ok: true,
+          text:
+            t.syncOk +
+            " · " +
+            fmtNum(etl.messages || 0) +
+            " " +
+            t.total +
+            (decrypt.seconds ? " · 解密 " + decrypt.seconds + "s" : ""),
+        });
+        setSessionsNonce((n) => n + 1);
+        if (sessionId) await loadFeed();
       }
+      log(api, "sync done -> " + preview(r, 300));
+    } catch (err) {
+      setSyncMsg({ ok: false, text: t.syncFail + "：" + errText(err) });
+    } finally {
       setSyncing(false);
     }
-  }, [api, sessionId, t, loadFeed, stopSyncPoll]);
+  }, [api, sessionId, t, loadFeed]);
 
   if (dep.phase === "checking") {
     return h("div", { className: "swf-root" }, h("div", { className: "swf-empty" }, "正在检测 wechat MCP…"));
