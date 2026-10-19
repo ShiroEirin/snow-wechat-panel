@@ -109,6 +109,22 @@ function hasCompleteJson(text) {
   }
 }
 
+/** 把正文里的 JSON 代码块剔掉。
+    结构化数据由面板的卡片单独渲染，正文里再裸露一遍既难读、也会盖住真正的报告文字。
+    （Agent 有时会把 json 块插到正文中间、甚至吐成残片。） */
+function stripAiJson(text) {
+  const s = String(text || "");
+  return s
+    .replace(/```([a-zA-Z]*)\r?\n([\s\S]*?)```/g, (all, lang, body) => {
+      const t = String(body || "").trim();
+      if (/^json$/i.test(String(lang || "").trim())) return "";
+      if (/^["{[]/.test(t)) return "";
+      return all;
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** 从 messages 域载荷里读出「最后一条 assistant 消息」的正文与完成状态。
     单轮深度分析与深挖流水线共用，避免两处完成判定分叉。 */
 function readAiMessage(data) {
@@ -3528,7 +3544,7 @@ function WechatPanel({ api, locale }) {
 
     lines.push("", "约束：");
     aiJsonConstraints(dims, limits).forEach((x) => lines.push(x));
-    lines.push("除正文里的这一个 json 块外，不要再输出其它代码块。");
+    lines.push("除末尾这一个 json 块外，正文里**不要**出现任何 JSON 或代码块；json 块必须是**完整可解析**的对象，并且放在回答的最后。");
 
     const extra = String(aiSettings.extra || "").trim();
     if (extra) {
@@ -3553,6 +3569,45 @@ function WechatPanel({ api, locale }) {
     },
     [api],
   );
+
+  /* ---- 总结持久化：刷新面板 / 切群再回来都不丢（存 api.storage，按会话分键） ---- */
+  const summaryKey = useCallback((sid) => "aiSummary:" + String(sid || ""), []);
+
+  // 总结完成即落盘（正文 + 结构化数据 + 覆盖的时间范围）
+  useEffect(() => {
+    if (!sessionId || aiStatus !== "done" || !aiText) return;
+    try {
+      if (api.storage && api.storage.setJson) {
+        api.storage.setJson(summaryKey(sessionId), {
+          text: aiText,
+          data: aiData || null,
+          rangeStart: rangeStart,
+          rangeEnd: rangeEnd,
+          at: Date.now(),
+        });
+      }
+    } catch (err) {
+      /* 存不进去不影响展示 */
+    }
+  }, [api, sessionId, aiStatus, aiText, aiData, rangeStart, rangeEnd, summaryKey]);
+
+  // 切会话 / 重开面板时把上次的总结读回来（绝不覆盖正在流式的会话）
+  useEffect(() => {
+    let alive = true;
+    if (!sessionId) return undefined;
+    Promise.resolve()
+      .then(() => (api.storage && api.storage.getJson ? api.storage.getJson(summaryKey(sessionId)) : null))
+      .then((saved) => {
+        if (!alive || !saved || !saved.text) return;
+        setAiText((prev) => prev || saved.text);
+        setAiData((prev) => prev || saved.data || null);
+        setAiStatus((prev) => (prev === "streaming" ? prev : "done"));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [api, sessionId, summaryKey]);
 
   /* ---- AI 深度分析：面板内流式渲染 ----
      两条数据通道：messages 域订阅（实时）+ 2s 轮询兜底。
@@ -3604,6 +3659,19 @@ function WechatPanel({ api, locale }) {
         }
         try {
           const resp = await api.metadata.get("messages", { params: { conversationId: convId } });
+          // 权限被拒时绝不能无声地等满 10 分钟超时：把原因直接甩到面板上。
+          // 常见成因：plugin.json 的 privacy.scopes 里没声明 "messages"，
+          // 或声明了但 app 的插件注册记录还是旧版（需要 rescan / 重装才会重读）。
+          const denied = resp && resp.denied && resp.denied.messages;
+          if (denied) {
+            setTargetAiStatus("done");
+            setSaveMsg(
+              "读取会话消息被拒（" + (denied.reason || "privacy-declaration-missing") +
+                "）：需要在 plugin.json 的 privacy.scopes 里声明 \"messages\"，然后重装或重扫插件。",
+            );
+            stopPoll();
+            return;
+          }
           const data = (resp && resp.domains && resp.domains.messages) || (resp && resp.messages) || resp;
           if (applyAiPayload(data)) stopPoll();
         } catch (err) {
@@ -4198,7 +4266,7 @@ function WechatPanel({ api, locale }) {
   }, [rangeStart, rangeEnd, stats, aiSettings]);
 
   // 结果槽：按当前档位优先，缺则回退另一档 —— 界面与报告同源，避免「看到 A 却报告写 B」
-  const shownAiText = deepMode === "deep" ? deepText || aiText : aiText || deepText;
+  const shownAiText = stripAiJson(deepMode === "deep" ? deepText || aiText : aiText || deepText);
   const shownAiData = deepMode === "deep" ? deepData || aiData : aiData || deepData;
   // 深挖最后一个已有会话的阶段（「打开会话」用）
   const deepLastConvId = useMemo(() => {

@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -118,6 +118,21 @@ ok("围栏 JSON 算完成", aiMsg('```json{"a":1}```').done === true);
 ok("状态白名单算完成", aiMsg("随便写点", "done").done === true);
 ok("空正文不算完成", aiMsg("", "").done === false);
 ok("只有工具调用 -> toolPending", lib.readAiMessage({ items: [{ role: "assistant", content: "", toolCallsJson: "[]" }] }).toolPending === true);
+
+console.log("stripAiJson");
+const norm = (s) => String(s).replace(/\n+/g, "\n");
+eq(
+  "剔 ```json 围栏",
+  norm(lib.stripAiJson('正文A\n```json\n{"x":1}\n```\n正文B')),
+  "正文A\n正文B",
+);
+eq(
+  "剔裸 JSON 围栏",
+  norm(lib.stripAiJson('正文A\n```\n{"x":1}\n```\n正文B')),
+  "正文A\n正文B",
+);
+ok("保留普通代码块", lib.stripAiJson('说明\n```js\nconsole.log(1)\n```').indexOf("console.log(1)") >= 0);
+eq("空输入", lib.stripAiJson(""), "");
 
 console.log("其他");
 ok("speakerColor 稳定", lib.speakerColor("Moment") === lib.speakerColor("Moment"));
