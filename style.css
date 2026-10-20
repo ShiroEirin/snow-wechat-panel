@@ -1562,6 +1562,8 @@
 .swf-senti-col {
   flex: 1 1 0;
   min-width: 0;
+  /* 只有 2 个点时也要限宽，否则两根柱子会把整行平分撑开 */
+  max-width: 44px;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -1577,6 +1579,37 @@
   font-size: 9px;
   color: var(--swf-dim);
   white-space: nowrap;
+}
+/* 情绪单点（日报）：不画柱子，一行摘要表达「日期 + 强度条 + 带符号分数」 */
+.swf-senti-one {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+}
+.swf-senti-one-k {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--swf-dim);
+  font-variant-numeric: tabular-nums;
+}
+.swf-senti-one-track {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--swf-active);
+  overflow: hidden;
+}
+.swf-senti-one-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+}
+.swf-senti-one-v {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- 深挖流水线：阶段进度与子代理进度标记 ---------- */

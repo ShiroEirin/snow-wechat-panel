@@ -378,30 +378,67 @@ function aiChartNodes(data) {
           )
         : null,
       aiData && Array.isArray(aiData.sentiment) && aiData.sentiment.length
-        ? h(
-            "div",
-            null,
-            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "📈"), "情绪曲线（-100 负面 / +100 正面）"),
-            h(
-              "div",
-              { className: "swf-senti" },
-              aiData.sentiment.slice(0, 14).map((x, i) => {
-                const score = Math.max(-100, Math.min(100, Number(x.score) || 0));
-                return h(
+        ? (() => {
+            const pts = aiData.sentiment.slice(0, 14).map((x) => ({
+              period: String((x && x.period) || ""),
+              score: Math.max(-100, Math.min(100, Number(x && x.score) || 0)),
+            }));
+            // 单点（日报只有一天）画不出「曲线」：此前 flex:1 + width:100% 会渲染成一块撑满的大色块，
+            // 改为一行摘要（日期 + 横条 + 带符号分数）。至少 2 个点才画柱状图。
+            if (pts.length === 1) {
+              const p = pts[0];
+              const pos = p.score >= 0;
+              return h(
+                "div",
+                null,
+                h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "📈"), "情绪（-100 负面 / +100 正面）"),
+                h(
                   "div",
-                  { className: "swf-senti-col", key: "senti-" + i, title: String(x.period || "") + "：" + score },
-                  h("div", {
-                    className: "swf-senti-bar",
-                    style: {
-                      height: Math.max(4, Math.abs(score)) + "%",
-                      background: score >= 0 ? ACCENT : "rgba(239,68,68,0.72)",
-                    },
-                  }),
-                  h("div", { className: "swf-senti-k" }, String(x.period || "").slice(-5)),
-                );
-              }),
-            ),
-          )
+                  { className: "swf-senti-one" },
+                  h("span", { className: "swf-senti-one-k" }, p.period.slice(-5) || "—"),
+                  h(
+                    "span",
+                    { className: "swf-senti-one-track" },
+                    h("span", {
+                      className: "swf-senti-one-fill",
+                      style: {
+                        width: Math.abs(p.score) + "%",
+                        background: pos ? ACCENT : "rgba(239,68,68,0.72)",
+                      },
+                    }),
+                  ),
+                  h(
+                    "span",
+                    { className: "swf-senti-one-v", style: { color: pos ? ACCENT : "#ef4444" } },
+                    (pos ? "+" : "") + p.score,
+                  ),
+                ),
+              );
+            }
+            return h(
+              "div",
+              null,
+              h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "📈"), "情绪曲线（-100 负面 / +100 正面）"),
+              h(
+                "div",
+                { className: "swf-senti" },
+                pts.map((p, i) =>
+                  h(
+                    "div",
+                    { className: "swf-senti-col", key: "senti-" + i, title: p.period + "：" + p.score },
+                    h("div", {
+                      className: "swf-senti-bar",
+                      style: {
+                        height: Math.max(4, Math.abs(p.score)) + "%",
+                        background: p.score >= 0 ? ACCENT : "rgba(239,68,68,0.72)",
+                      },
+                    }),
+                    h("div", { className: "swf-senti-k" }, p.period.slice(-5)),
+                  ),
+                ),
+              ),
+            );
+          })()
         : null,
       aiData && Array.isArray(aiData.controversies) && aiData.controversies.length
         ? h(
