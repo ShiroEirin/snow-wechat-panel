@@ -133,6 +133,34 @@ eq(
 );
 ok("保留普通代码块", lib.stripAiJson('说明\n```js\nconsole.log(1)\n```').indexOf("console.log(1)") >= 0);
 eq("空输入", lib.stripAiJson(""), "");
+// 末尾裸 JSON（模型漏了围栏与标记）—— 成员分析实测踩过：正文下方挂着一大坨 JSON
+eq(
+  "剔末尾裸 JSON",
+  norm(lib.stripAiJson('正文A\n{"persona":"x","topics":[]}')),
+  "正文A",
+);
+eq(
+  "剔末尾裸 JSON（多行）",
+  norm(lib.stripAiJson('正文A\n{\n  "persona": "x"\n}')),
+  "正文A",
+);
+// 保守边界：JSON 不在行首（紧贴正文）时不剥，避免误伤行内提到的 JSON
+eq(
+  "紧贴正文的 JSON 不剥",
+  lib.stripAiJson('正文A{"x":1}'),
+  '正文A{"x":1}',
+);
+eq(
+  "行内 JSON 不剥",
+  lib.stripAiJson('他说 {"a":1} 是这样'),
+  '他说 {"a":1} 是这样',
+);
+// AI_JSON 标记写法
+eq(
+  "剔 AI_JSON 标记块",
+  norm(lib.stripAiJson('正文A\n<<<AI_JSON>>>\n{"x":1}\n<<<END>>>')),
+  "正文A",
+);
 
 console.log("其他");
 ok("speakerColor 稳定", lib.speakerColor("Moment") === lib.speakerColor("Moment"));

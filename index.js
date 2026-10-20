@@ -109,22 +109,54 @@ function hasCompleteJson(text) {
   }
 }
 
+/** 剥掉正文末尾裸露的结构化 JSON 块（模型既没加围栏、也没加标记时）。
+    只在「对象从行首开始、且一直延伸到文本结尾」时剥，避免误伤正文里行内提到的 JSON。 */
+function stripTrailingJsonBlock(text) {
+  const s = String(text || "");
+  const trimmed = s.replace(/[ \t\r\n]+$/, "");
+  if (!trimmed.endsWith("}")) return s;
+  const end = trimmed.length - 1;
+  // 只回扫末尾一段，避免长正文反复 JSON.parse
+  const floor = Math.max(0, end - 20000);
+  for (let start = trimmed.lastIndexOf("{", end); start >= floor; start = trimmed.lastIndexOf("{", start - 1)) {
+    const atLineStart = start === 0 || trimmed[start - 1] === "\n" || trimmed[start - 1] === "\r";
+    if (!atLineStart) continue;
+    try {
+      const v = JSON.parse(trimmed.slice(start, end + 1));
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        return trimmed.slice(0, start).replace(/[ \t\r\n]+$/, "");
+      }
+    } catch (err) {
+      /* 继续往前找 */
+    }
+  }
+  return s;
+}
+
 /** 把正文里的结构化数据块剔掉。
-    支持两种写法：`<<<AI_JSON>>> … <<<END>>>`（推荐）与 ```json 围栏，
+    支持三种写法：`<<<AI_JSON>>> … <<<END>>>`（推荐）、```json 围栏、
+    以及**末尾裸露的 JSON 对象**（模型漏了围栏时）。
     另外围栏体以 { [ " 开头的代码块也当作数据块剔掉。
     （Agent 有时会把数据块插到正文中间、甚至吐成残片。） */
 function stripAiJson(text) {
   const s = String(text || "");
-  return s
-    .replace(/<<<AI_JSON>>>[\s\S]*?<<<END>>>/gi, "")
-    .replace(/```([a-zA-Z]*)\r?\n([\s\S]*?)```/g, (all, lang, body) => {
-      const t = String(body || "").trim();
-      if (/^json$/i.test(String(lang || "").trim())) return "";
-      if (/^["{\[]/.test(t)) return "";
-      return all;
-    })
+  return stripTrailingJsonBlock(
+    s
+      .replace(/<<<AI_JSON>>>[\s\S]*?<<<END>>>/gi, "")
+      .replace(/```([a-zA-Z]*)\r?\n([\s\S]*?)```/g, (all, lang, body) => {
+        const t = String(body || "").trim();
+        if (/^json$/i.test(String(lang || "").trim())) return "";
+        if (/^["{\[]/.test(t)) return "";
+        return all;
+      }),
+  )
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** 成员分析结果的持久化 key（按「会话 + 成员」分键，与群分析的 aiSummary:<sid> 并列）。 */
+function memberSummaryKey(sid, uname) {
+  return "memberSummary:" + String(sid || "") + ":" + String(uname || "");
 }
 
 /** 从一段混杂文本里取出**最后一个能解析**的 JSON 对象 —— 用来补救模型把 json 写残的情况。 */
@@ -509,11 +541,17 @@ const AI_FORMAT_RULES = [
   "- 表格只用于真正的多列对照，不要为了排版而表格",
 ];
 
+/** 结构化数据块的统一约定：单会话 / 深挖 / 成员三条链路共用一份，避免提示词分叉。
+    即使模型漏了围栏与标记，渲染侧的 stripAiJson 也会把末尾裸 JSON 剥掉。 */
+const AI_JSON_CONTRACT =
+  "数据块约定：优先用 <<<AI_JSON>>> 与 <<<END>>> 包裹（也接受 ```json 围栏），" +
+  "必须是**完整可解析**的对象、放在回答最后；除末尾这一个数据块外，正文里**不要**出现任何 JSON 或代码块。";
+
 /** 子代理的公共纪律：子代理没有父会话上下文，必须自带全部信息；且它默认是编码助手，要明确禁止写操作。 */
 const DEEP_SUBAGENT_RULES = [
   "子代理 prompt 必须自带完整上下文（它看不到你的对话历史），并写明：",
   "- 禁止事项：只读分析；不许写文件、不许执行 git 或构建命令、不许向微信发送任何消息",
-  "- 产出格式：正文 + 末尾一个 json 代码块（三个反引号 + json）",
+  "- 产出格式：正文 + 末尾一个结构化数据块（" + AI_JSON_CONTRACT + "）",
 ];
 
 /** 阶段 1：并行分段读事实（只提取事实，禁止下结论）。 */
@@ -562,7 +600,7 @@ function deepSegmentPrompt(o) {
     "  ]",
     "}",
     "约束：timeline 每段最多 25 条，只留信息量最大的；quotes 每段最多 8 条且必须原文；没有的字段给空数组。",
-    "除正文里的这一个 json 块外，不要再输出其它代码块。",
+    AI_JSON_CONTRACT,
   );
   const extra = String(o.extra || "").trim();
   if (extra) lines.push("", "补充要求（用户自定义，优先遵守）：", extra);
@@ -618,7 +656,7 @@ function deepLensPrompt(o) {
     "  ]",
     "}",
     "约束：confidence 取 0-100；每个视角 findings 3-10 条，宁缺毋滥；没有的字段给空数组。",
-    "除正文里的这一个 json 块外，不要再输出其它代码块。",
+    AI_JSON_CONTRACT,
   );
   const extra = String(o.extra || "").trim();
   if (extra) lines.push("", "补充要求（用户自定义，优先遵守）：", extra);
@@ -676,7 +714,7 @@ function deepVerifyPrompt(o) {
     "  ]",
     "}",
     "约束：issues 只列**真问题**，不要为了凑数把站得住的结论也标成问题；confidence 取 0-100（该视角结论的可信度）。",
-    "除正文里的这一个 json 块外，不要再输出其它代码块。",
+    AI_JSON_CONTRACT,
   );
   const extra = String(o.extra || "").trim();
   if (extra) lines.push("", "补充要求（用户自定义，优先遵守）：", extra);
@@ -721,12 +759,12 @@ function deepFinalPrompt(o) {
   if (dims.todos) lines.push(idx++ + ". 关键结论 / 待办 / 需要谁跟进");
   if (dims.risks) lines.push(idx++ + ". 争议点与风险");
   if (dims.sentiment) lines.push(idx++ + ". 群氛围与情绪走向（结合统计与原文，不要编造）");
-  lines.push("", "第二部分：在正文最后追加一个 json 代码块（用三个反引号包裹，标注 json），只放结构化数据，不要写注释：", "{");
+  lines.push("", "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：", "{");
   lines.push(aiJsonFields(dims, limits).join(",\n"));
   lines.push("}");
   lines.push("", "约束：");
   aiJsonConstraints(dims, limits).forEach((x) => lines.push(x));
-  lines.push("除正文里的这一个 json 块外，不要再输出其它代码块。");
+  lines.push(AI_JSON_CONTRACT);
   const extra = String(o.extra || "").trim();
   if (extra) lines.push("", "补充要求（用户自定义，优先遵守）：", extra);
   return lines.join("\n");
@@ -3502,6 +3540,22 @@ function WechatPanel({ api, locale }) {
         if (memberGenRef.current !== gen) return;
         const r = unwrapMcp(raw);
         setMemberProfile(r && !r.error ? r : { error: (r && r.error) || "读取成员画像失败" });
+        // 回填该成员上一次的分析结果：刷新 / 切群再回来不必重跑（口径一致才回填，
+        // 且此时必然没有在流式的分析 —— 上面的清理已经把状态复位了）
+        if (r && !r.error && api.storage && api.storage.getJson) {
+          try {
+            const saved = await api.storage.getJson(memberSummaryKey(sessionId, username));
+            if (memberGenRef.current !== gen) return;
+            if (saved && saved.text && !!saved.allTime === allTime) {
+              setMemberAiText(saved.text);
+              setMemberAiData(saved.data || null);
+              setMemberAiStatus("done");
+              setMemberAiMsg("已恢复上次分析结果（" + new Date(saved.at || Date.now()).toLocaleString() + "）");
+            }
+          } catch (err) {
+            /* 读不回来不影响使用 */
+          }
+        }
       } catch (err) {
         if (memberGenRef.current !== gen) return;
         setMemberProfile({ error: errText(err) });
@@ -3598,14 +3652,14 @@ function WechatPanel({ api, locale }) {
     if (dims.risks) lines.push(idx++ + ". 争议点与风险");
     if (dims.sentiment) lines.push(idx++ + ". 群氛围与情绪走向（结合统计与原文，不要编造）");
 
-    lines.push("", "第二部分：在正文最后追加一个 json 代码块（用三个反引号包裹，标注 json），只放结构化数据，不要写注释：", "{");
+    lines.push("", "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：", "{");
     // 字段与约束由模块级生成器提供：深挖汇总阶段共用同一份 schema，避免两处分叉
     lines.push(aiJsonFields(dims, limits).join(",\n"));
     lines.push("}");
 
     lines.push("", "约束：");
     aiJsonConstraints(dims, limits).forEach((x) => lines.push(x));
-    lines.push("除末尾这一个结构化数据块外，正文里**不要**出现任何 JSON 或代码块；数据块优先用 <<<AI_JSON>>> 与 <<<END>>> 包裹（也接受 ```json 围栏），必须是**完整可解析**的对象，并且放在回答的最后。");
+    lines.push(AI_JSON_CONTRACT);
 
     const extra = String(aiSettings.extra || "").trim();
     if (extra) {
@@ -3657,6 +3711,24 @@ function WechatPanel({ api, locale }) {
       /* 存不进去不影响展示 */
     }
   }, [api, sessionId, aiStatus, aiText, aiData, rangeStart, rangeEnd, summaryKey]);
+
+  // 成员分析完成即落盘（正文 + 结构化数据 + 口径），刷新 / 切群再回来不丢
+  useEffect(() => {
+    const uname = memberProfile && memberProfile.member && memberProfile.member.username;
+    if (!sessionId || !uname || memberAiStatus !== "done" || !memberAiText) return;
+    try {
+      if (api.storage && api.storage.setJson) {
+        api.storage.setJson(memberSummaryKey(sessionId, uname), {
+          text: memberAiText,
+          data: memberAiData || null,
+          allTime: memberAllTime,
+          at: Date.now(),
+        });
+      }
+    } catch (err) {
+      /* 存不进去不影响展示 */
+    }
+  }, [api, sessionId, memberProfile, memberAiStatus, memberAiText, memberAiData, memberAllTime]);
 
   // 切会话 / 重开面板时把上次的总结读回来（绝不覆盖正在流式的会话）
   useEffect(() => {
@@ -4095,30 +4167,41 @@ function WechatPanel({ api, locale }) {
         "",
         "输出分两部分。",
         "",
-        "第一部分：Markdown 正文，包含：",
-        "1. 一句话人物素描（TA 在这个群里是谁）",
-        "2. 近期关注与观点（分点，尽量引用原话）",
-        "3. 语言风格与口头禅（结合 tone_words / top_phrases / samples）",
-        "4. 互动对象与群内角色（谁常和 TA 互动、TA 起什么作用）",
-        "5. 值得注意的发言或提醒",
+        "第一部分：Markdown 正文 —— 这是**群友锐评**，不是述职报告：",
+        "",
+        "调性（重要）：",
+        "- 用群里的原话和梗说话：能一句话定性就别铺垫；允许玩梗、起外号、贴标签，但每个标签后面必须跟一句原文依据（不许只有梗没有证据）。",
+        "- 抽象要有度：可以夸张、可以损，但不人身攻击、不编造没发生的事；看不出来就写「看不出来」，不要硬凑。",
+        "- 允许口语与网络用语（这哥们 / 绷不住 / 硬控 / 属于是），但不为了搞笑牺牲信息量。",
+        "- 所有判断都要落到该成员的实际发言上，不要拿「大家普遍觉得」这种无源结论充数。",
+        "",
+        "结构：",
+        "1. **一句话定性** —— TA 在这个群里是谁（带梗，但要准）",
+        "2. **名场面** —— 1-3 个最有代表性的瞬间，每条逐字摘原文（不要改写）",
+        "3. **语言指纹** —— 口头禅 / 语气 / 标点与长度习惯（结合 tone_words / top_phrases / samples）",
+        "4. **社交位置** —— 常和谁互动、在什么话题里冒头、扮演什么角色",
+        "5. **一句忠告** —— 给 TA 或群主的（可以损，但要有用）",
         "",
         ...AI_FORMAT_RULES,
         "",
-        "第二部分：在正文最后追加一个 json 代码块（三个反引号 + json），只放结构化数据，不要写注释：",
+        "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：",
         "{",
-        '  "persona": "一句话人物素描",',
+        '  "persona": "一句话人物素描（与正文第 1 条同源，可带梗）",',
         '  "topics": [{"name": "关注点", "weight": 0, "keywords": ["关键词"]}],',
         '  "style": {"tone": "语气特征", "habits": ["口头禅或习惯"]},',
         '  "interactions": [{"with": "互动对象", "pattern": "互动模式"}],',
-        '  "quotes": [{"text": "原话", "why": "为什么值得记住"}],',
+        '  "quotes": [{"text": "原话（逐字）", "why": "为什么值得记住"}],',
         '  "advice": ["给管理员或本人的建议"]',
         "}",
         "",
-        "约束：topics 2-6 个（weight 取 0-100）；quotes 2-5 条且必须是原文摘录；没有把握的字段给空数组 / 空字符串，不要编造。",
-        "除正文里的这一个 json 块外，不要再输出其它代码块。",
+        "约束：topics 2-6 个（weight 取 0-100）；quotes 2-5 条且必须是原文逐字摘录；没有把握的字段给空数组 / 空字符串，不要编造。",
+        AI_JSON_CONTRACT,
+        ...(String(aiSettings.extra || "").trim()
+          ? ["", "补充要求（用户自定义，优先遵守）：", String(aiSettings.extra).trim()]
+          : []),
       ].join("\n");
     },
-    [current, sessionId, rangeStart, rangeEnd, memberAllTime],
+    [current, sessionId, rangeStart, rangeEnd, memberAllTime, aiSettings],
   );
 
   const runMemberAi = useCallback(async () => {
@@ -4179,7 +4262,7 @@ function WechatPanel({ api, locale }) {
   }, [api, memberAiConvId]);
 
   const copyMemberAi = useCallback(async () => {
-    const text = String(memberAiText || "").replace(/```json\s*[\s\S]*?```/i, "").trim();
+    const text = stripAiJson(memberAiText);
     if (!text) return;
     const res = await api.write.run("system.writeClipboardText", { text: text });
     setMemberAiMsg(res && res.ok ? "已复制分析正文" : "复制失败：" + ((res && res.error) || "未知错误"));
@@ -4235,7 +4318,7 @@ function WechatPanel({ api, locale }) {
     }
     lines.push("");
     lines.push("## AI 角色分析");
-    const ai = String(memberAiText || "").replace(/```json\s*[\s\S]*?```/i, "").trim();
+    const ai = stripAiJson(memberAiText);
     lines.push(ai || "（尚未生成：在面板点「分析该成员」后再导出）");
     lines.push("");
     lines.push("---");
@@ -5878,7 +5961,13 @@ function WechatPanel({ api, locale }) {
           memberAiMsg ? h("div", { className: "swf-note" }, memberAiMsg) : null,
           memberMsg ? h("div", { className: "swf-note" }, memberMsg) : null,
             memberAiData && memberAiData.persona
-              ? h("div", { className: "swf-note" }, "人物素描：" + String(memberAiData.persona))
+              ? h(
+                  "div",
+                  { className: "swf-quote-card" },
+                  h("b", null, "🎭 一句话定性"),
+                  "：",
+                  String(memberAiData.persona),
+                )
               : null,
             memberAiData && Array.isArray(memberAiData.topics) && memberAiData.topics.length
               ? (() => {
@@ -5886,7 +5975,7 @@ function WechatPanel({ api, locale }) {
                   return h(
                     "div",
                     null,
-                    h("div", { className: "swf-sub" }, "关注点"),
+                    h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🔍"), "关注点"),
                     memberAiData.topics.map((x, i) =>
                       h(
                         "div",
@@ -5909,20 +5998,25 @@ function WechatPanel({ api, locale }) {
             memberAiData && memberAiData.style
               ? h(
                   "div",
-                  { className: "swf-words" },
-                  memberAiData.style.tone
-                    ? h("span", { className: "swf-word" }, "语气：" + String(memberAiData.style.tone))
-                    : null,
-                  (Array.isArray(memberAiData.style.habits) ? memberAiData.style.habits : [])
-                    .slice(0, 6)
-                    .map((x, i) => h("span", { className: "swf-word", key: "mhabit-" + i }, String(x))),
+                  null,
+                  h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🗣"), "语言指纹"),
+                  h(
+                    "div",
+                    { className: "swf-words" },
+                    memberAiData.style.tone
+                      ? h("span", { className: "swf-word" }, "语气：" + String(memberAiData.style.tone))
+                      : null,
+                    (Array.isArray(memberAiData.style.habits) ? memberAiData.style.habits : [])
+                      .slice(0, 6)
+                      .map((x, i) => h("span", { className: "swf-word", key: "mhabit-" + i }, String(x))),
+                  ),
                 )
               : null,
             memberAiData && Array.isArray(memberAiData.interactions) && memberAiData.interactions.length
               ? h(
                   "div",
                   null,
-                  h("div", { className: "swf-sub" }, "互动对象"),
+                  h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🤝"), "社交位置"),
                   memberAiData.interactions.map((x, i) =>
                     h("div", { className: "swf-todo", key: "mint-" + i }, h("b", null, String(x.with || "?")), " · ", String(x.pattern || "")),
                   ),
@@ -5932,12 +6026,13 @@ function WechatPanel({ api, locale }) {
               ? h(
                   "div",
                   null,
-                  h("div", { className: "swf-sub" }, "值得记住的发言"),
+                  h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "💬"), "名场面 · 值得记住的发言"),
                   memberAiData.quotes.map((x, i) =>
                     h(
                       "div",
-                      { className: "swf-todo", key: "mquote-" + i },
-                      "「" + String(x.text || "") + "」",
+                      { className: "swf-quote-card", key: "mquote-" + i },
+                      x.time ? h("b", null, String(x.time) + " ") : null,
+                      String(x.text || ""),
                       x.why ? h("span", { className: "swf-note" }, "（" + String(x.why) + "）") : null,
                     ),
                   ),
@@ -5947,7 +6042,7 @@ function WechatPanel({ api, locale }) {
               ? h(
                   "div",
                   null,
-                  h("div", { className: "swf-sub" }, "建议"),
+                  h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🎯"), "一句忠告"),
                   memberAiData.advice.map((x, i) => h("div", { className: "swf-risk", key: "madv-" + i }, "→ ", String(x))),
                 )
               : null,
@@ -5955,7 +6050,7 @@ function WechatPanel({ api, locale }) {
               ? h(
                   "div",
                   { className: "swf-ai-out swf-ai-md" },
-                  mdToReact(String(memberAiText).replace(/```json[\s\S]*?```/i, "").trim()),
+                  mdToReact(stripAiJson(memberAiText)),
                 )
               : null,
           )
