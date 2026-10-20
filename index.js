@@ -1691,10 +1691,13 @@ function funTitles(stats) {
   return out;
 }
 
-/* 横条榜：items = [{name, count, suffix}]；条长按最大值归一，opts.max 可覆盖分母 */
+/* 横条榜：items = [{name, count, suffix}]；条长按最大值归一，opts.max 可覆盖分母。
+   opts.keepZero 保留 0 值行 —— 对称维度（如「早起 / 深夜」）必须把 0 显示出来，
+   否则少一行会被读者当成漏项（实测：某成员早起为 0 时只显示深夜，被误读成展示错误）。
+   opts.rank === false 关闭前三奖牌 —— 非排行榜语义（时间节奏 / 内容构成）不该发金银铜。 */
 function bars(items, opts) {
   const o = opts || {};
-  const list = (items || []).filter((x) => x && (x.name || x.label) && Number(x.count) > 0);
+  const list = (items || []).filter((x) => x && (x.name || x.label) && (o.keepZero || Number(x.count) > 0));
   if (!list.length) return null;
   const max = Number(o.max) > 0 ? Number(o.max) : list.reduce((a, x) => Math.max(a, Number(x.count) || 0), 1);
   return list.map((x, i) => {
@@ -1715,8 +1718,9 @@ function bars(items, opts) {
         { className: "swf-bar-track" },
         h("div", {
           className: "swf-bar-fill",
-          // 最小 2.5%：小条目（如类型分布里的「文件 3 条」）否则几乎不可见
-          style: { width: Math.max(2.5, Math.min(100, (n / max) * 100)) + "%", background: color },
+          // 最小 2.5%：小条目（如类型分布里的「文件 3 条」）否则几乎不可见；
+          // 0 值不画条（2.5% 的残留条会被误读成「有一点点」）
+          style: { width: (n > 0 ? Math.max(2.5, Math.min(100, (n / max) * 100)) : 0) + "%", background: color },
         }),
       ),
       h("div", { className: "swf-bar-num" + (o.wideNum ? " swf-bar-num-wide" : "") }, fmtNum(n) + (x.suffix || "")),
@@ -6279,10 +6283,19 @@ function WechatPanel({ api, locale }) {
                     count: x.count,
                     suffix: total ? " · " + fmtPct(Number(x.count) / total) : "",
                   }));
-              const timeMix = toBars([
-                { name: "早起 6–8 时", count: rhythm.early_messages },
-                { name: "深夜 0–5 时", count: rhythm.night_messages },
-              ]);
+              // 时间节奏：只有「早起 / 深夜」两个对称维度 —— 0 值必须显示（过滤掉一个会被误读成漏项），
+              // 且按时间顺序固定排列：这是时间轴语义，不是排行榜，所以既不排序也不发奖牌。
+              const hasRhythm = rhythm.early_messages != null || rhythm.night_messages != null;
+              const timeMix = hasRhythm
+                ? [
+                    { name: "早起 6–8 时", count: Number(rhythm.early_messages) || 0 },
+                    { name: "深夜 0–5 时", count: Number(rhythm.night_messages) || 0 },
+                  ].map((x) => ({
+                    name: x.name,
+                    count: x.count,
+                    suffix: total ? " · " + fmtPct(x.count / total) : "",
+                  }))
+                : [];
               const contentMix = toBars([
                 { name: "表情", count: media.emojis },
                 { name: "图片", count: media.images },
@@ -6299,7 +6312,7 @@ function WechatPanel({ api, locale }) {
                       "div",
                       null,
                       h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🕒"), "时间节奏 · 分母 " + fmtNum(total) + " 条"),
-                      bars(timeMix, { key: "mtime", wideNum: true }),
+                      bars(timeMix, { key: "mtime", wideNum: true, keepZero: true, rank: false }),
                     )
                   : null,
                 contentMix.length
@@ -6307,7 +6320,7 @@ function WechatPanel({ api, locale }) {
                       "div",
                       null,
                       h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🧩"), "内容构成 · 同一条可计入多个维度"),
-                      bars(contentMix, { key: "mcontent", wideNum: true }),
+                      bars(contentMix, { key: "mcontent", wideNum: true, rank: false }),
                     )
                   : null,
               );
