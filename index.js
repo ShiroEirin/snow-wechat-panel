@@ -463,7 +463,12 @@ function aiChartNodes(data) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🏅"), "称号评定"),
+            h(
+              "div",
+              { className: "swf-sub", title: "AI 根据聊天内容评定的称号，受「分析设置」的「称号」开关控制" },
+              h("span", { className: "swf-ico" }, "🏅"),
+              "AI 称号",
+            ),
             h(
               "div",
               { className: "swf-words" },
@@ -506,6 +511,27 @@ function aiChartNodes(data) {
               : null,
           )
         : null,
+  ];
+}
+
+/** 观察与建议：主观判断独立成块，渲染在正文**之后** —— 读者先看完事实与依据，
+    再看 AI 的判断（信任设计）。长图与 Markdown 报告同样把它放末尾，三端顺序一致。 */
+function aiInsightNodes(data) {
+  const aiData = data || null;
+  if (!aiData || !Array.isArray(aiData.insights) || !aiData.insights.length) return [];
+  return [
+    h(
+      "div",
+      null,
+      h(
+        "div",
+        { className: "swf-sub" },
+        h("span", { className: "swf-ico" }, "🧠"),
+        "观察与建议",
+        h("span", { className: "swf-badge" }, "主观"),
+      ),
+      aiData.insights.slice(0, 5).map((x, i) => h("div", { className: "swf-insight", key: "ins-" + i }, "→ ", String(x))),
+    ),
   ];
 }
 
@@ -572,12 +598,15 @@ function aiJsonConstraints(dims, limits) {
   const d = dims || {};
   const lim = limits || {};
   const out = ["- summary 是一句话导语（30 字以内），不要复述下面的结构，要能让人一眼知道当天发生了什么。"];
+  out.push("- key_points 3-5 条，每条一句话（40 字以内），必须是能从上文或统计里核验的事实 / 结论，不要写感想。");
+  out.push("- key_points 不要复述 summary 已经说过的核心事件，也不要把统计数字当要点（总量 / 人数 / 峰值小时 / 榜单名次这些图表里已有）；要点要往「发生了什么、影响是什么」上写。");
   if (d.topics) out.push("- topics 3-" + (lim.topics || 8) + " 个（weight 取 0-100 的相对重要度）。");
   if (d.sentiment) out.push("- sentiment 按天或按周给分（-100 到 100，负=负面，正=正面），最多 14 个点。");
   if (d.controversies) out.push("- controversies level 取 0-5。");
   if (d.titles) out.push("- titles 1-" + (lim.titles || 5) + " 个（可以是趣味称号，但必须给依据）。");
   if (d.quotes) out.push("- quotes 1-" + (lim.quotes || 5) + " 条，必须是原文摘录。");
   if (d.profile) out.push("- profile.advice 2-4 条，面向群管理员或参与者。");
+  out.push("- insights 2-3 条，是主观判断与建议（面板会标注为「主观」），每条都要能指出依据；没把握就给空数组。");
   out.push("- 没有数据的字段给空数组 / 空对象，不要编造。");
   return out;
 }
@@ -597,6 +626,27 @@ const AI_FORMAT_RULES = [
   "- 关键人名、工具名、结论用 **加粗**",
   "- 原文摘录用引用块或 QUOTE callout，必须逐字摘录",
   "- 表格只用于真正的多列对照，不要为了排版而表格",
+];
+
+/** 正文「分类要点」的写法示例：单会话与深挖成稿共用同一份，避免两条链路风格漂移。 */
+const AI_CATEGORY_RULES = [
+  "分类要点：根据实际内容**自行归纳** 3-6 个分类，每个分类标题带一个贴切的 emoji，例如：",
+  "- 🛠 工具技巧 / 实战经验",
+  "- 📦 资源推荐",
+  "- 📰 行业动态",
+  "- 💬 观点碰撞",
+  "- 😄 群友趣事",
+  "（分类名要贴合实际内容，不要生搬硬套；没有内容的分类不要出现；同一话题多人讨论要归并，不要逐条罗列）",
+];
+
+/** 正文数据纪律：面板已经把统计画成图表，正文只负责「图表说不出来的事」。
+    实测过的毛病 —— 深挖产物会把 KPI 卡 / 24 小时图 / 消息类型图里的数字再抄一遍。 */
+const AI_DATA_DISCIPLINE = [
+  "数据纪律（面板会把统计画成图表，正文只写图表说不出来的东西）：",
+  "- **不要复述图表已经展示的数字**：消息总量 / 发言人数 / 人均 / 峰值小时 / 小时分布 / 成员榜 / 被引用榜 / 消息类型占比，这些卡片与图表里都有，正文再抄一遍就是废话。",
+  "- 只有**结论必须依赖某个数字**时才引用它，并且点到结论为止，不要把统计罗列成一串。",
+  "- 比例 / 份额 / 百分比**一律引用给定的统计基线**（如 concentration 的 Gini、HHI、Top-N 份额）；基线里没有的不要自己算，确实必须自算时写明口径。",
+  "- 记录覆盖不足整个时间窗时，**用 INFO callout 说明实际覆盖范围与数据快照时点**（例如「本日索引实际覆盖 00:00—17:40，其后记录未入库」），不要让读者误以为覆盖了全窗口。",
 ];
 
 /** 结构化数据块的统一约定：单会话 / 深挖 / 成员三条链路共用一份，避免提示词分叉。
@@ -749,11 +799,12 @@ function deepVerifyPrompt(o) {
   lines.push("");
   DEEP_SUBAGENT_RULES.forEach((x) => lines.push(x));
   lines.push(
-    "每个子代理必须完成四件事，缺一不可：",
+    "每个子代理必须完成五件事，缺一不可：",
     "1. **对账**：结论里的每个数字 / 名次 / 人数，与统计基线逐项核对，不一致就列为 issue",
     "2. **查无据**：evidence 为「无据」或明显撑不起 claim 的，列为 issue",
     "3. **找遗漏**：该视角明显该提却没提的（例如有撤回、有争议却一字未提）",
     "4. **找矛盾**：同一视角内部、或跨视角互相打架的结论",
+    "5. **查冗余**：只复述统计基线 / 图表数字（总量、人数、峰值小时、榜单名次）而没有新结论的、跨视角重复的、正文与结构化字段重复的 —— 一并列为 issue，fix 写「删」",
     "",
     "取证要求：鼓励用 search_wechat_messages / get_messages_by_range 回原文确认；凡断言「原文里没有」，必须先实际查过。",
     "",
@@ -806,11 +857,10 @@ function deepFinalPrompt(o) {
     "",
     "开头导语：1-2 句话概括这段时间最核心的内容（让人 30 秒抓住重点，不要复述下面的分类）。",
     "",
-    "分类要点：根据实际内容**自行归纳** 3-6 个分类，每个分类标题带一个贴切的 emoji。",
-    "（分类名要贴合实际内容；没有内容的分类不要出现；同一话题多人讨论要归并）",
-    "",
   ];
+  AI_CATEGORY_RULES.forEach((x) => lines.push(x));
   AI_FORMAT_RULES.forEach((x) => lines.push(x));
+  AI_DATA_DISCIPLINE.forEach((x) => lines.push(x));
   lines.push("", "附加章节（按需，没有就不写）：");
   let idx = 1;
   if (dims.topics) lines.push(idx++ + ". 主要议题（分点，标注参与人）");
@@ -1605,7 +1655,7 @@ function fmtPct(v) {
   const n = Number(v);
   return Number.isFinite(n) ? (n * 100).toFixed(1) + "%" : "—";
 }
-/* 群友称号（乐子版）：member_leaders 的字段 → 图标 / 称号 / 单位 */
+/* 统计称号（乐子版）：member_leaders 的字段 → 图标 / 称号 / 单位 */
 const FUN_TITLES = [
   ["messages", "💦", "水群王", "条"],
   ["chars", "📢", "话痨之王", "字"],
@@ -1620,7 +1670,7 @@ const FUN_TITLES = [
   ["recall_like_events", "🫥", "撤回大师", "次"],
 ];
 
-/** 从 member_leaders 取各维度冠军，拼成「群友称号」列表（值为 0 的维度跳过） */
+/** 从 member_leaders 取各维度冠军，拼成「统计称号」列表（值为 0 的维度跳过） */
 function funTitles(stats) {
   const ml = (stats && stats.member_leaders) || {};
   const out = [];
@@ -2052,6 +2102,23 @@ const REPORT_CSS =
     ".quote::before{content:'“';position:absolute;left:11px;top:6px;font-size:22px;color:#86efac;font-family:Georgia,serif;line-height:1}" +
     ".quote .muted{margin-left:6px}" +
     ".item{font-size:13px;margin:5px 0;line-height:1.65}" +
+    // AI 图表区块（话题 / 待办 / 风险 / 情绪 / 争议）：与面板卡片区同一套视觉语言
+    ".chart-row{display:flex;align-items:center;gap:8px;margin:5px 0}" +
+    ".chart-name{flex:0 0 34%;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
+    ".chart-track{flex:1 1 auto;height:9px;background:#eef1f5;border-radius:5px;overflow:hidden}" +
+    ".chart-fill{height:100%;border-radius:5px}" +
+    ".chart-num{flex:0 0 34px;text-align:right;font-size:12px;color:#6b7280}" +
+    ".words{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0 0}" +
+    ".word{font-size:11.5px;padding:2px 8px;border-radius:999px;background:#f1f5f9;color:#475569}" +
+    ".risk{font-size:13px;margin:5px 0;line-height:1.65;padding:6px 10px;border-left:3px solid #f59e0b;background:rgba(245,158,11,.06);border-radius:0 8px 8px 0}" +
+    ".senti{display:flex;align-items:flex-end;gap:6px;height:96px;margin:6px 0 2px}" +
+    ".senti-col{flex:1 1 0;max-width:44px;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}" +
+    ".senti-bar{width:100%;border-radius:4px 4px 0 0;min-height:4px}" +
+    ".senti-k{font-size:9.5px;color:#9ca3af}" +
+    ".senti-one{display:flex;align-items:center;gap:9px;margin:6px 0}" +
+    ".senti-one-track{flex:1 1 auto;height:10px;background:#eef1f5;border-radius:5px;overflow:hidden}" +
+    ".senti-one-fill{display:block;height:100%;border-radius:5px}" +
+    ".senti-v{font-size:12.5px;font-weight:600}" +
     // Callout：AI 正文里的 > [!TIP] 之类，样式全在这（模型只写语义）
     ".callout{margin:11px 0;padding:10px 13px;border-radius:10px;border-left:3px solid #9ca3af;background:#f7f8fa;font-size:13px;line-height:1.7}" +
     ".callout-h{font-weight:600;font-size:12.5px;margin-bottom:3px}" +
@@ -2181,9 +2248,107 @@ function buildReportHtml(opts) {
   const lead = String(ai.summary || "").trim();
   const aiBlocks = [];
   if (aiText) aiBlocks.push('<div class="sec">AI 分析</div><div class="md">' + mdToHtml(aiText) + "</div>");
+  // AI 图表区块：话题 / 待办 / 风险 / 情绪 / 争议 —— 面板卡片区有的，长图必须有
+  // （此前长图只有称号 / 金句 / 群画像，同一份 JSON 在两端画出的东西不一样）
+  if (list(ai.topics).length) {
+    const maxW = list(ai.topics).reduce((a, x) => Math.max(a, Number(x && x.weight) || 0), 1);
+    const kws = list(ai.topics).flatMap((x) => list(x && x.keywords).slice(0, 4));
+    aiBlocks.push(
+      '<div class="sec">话题分布</div>' +
+        list(ai.topics)
+          .map((x) => {
+            const w = Math.max(3, ((Number(x && x.weight) || 0) / maxW) * 100);
+            return (
+              '<div class="chart-row"><div class="chart-name">' +
+              escHtml(x && x.name) +
+              '</div><div class="chart-track"><div class="chart-fill" style="width:' +
+              w.toFixed(1) +
+              "%;background:" +
+              ACCENT +
+              '"></div></div><div class="chart-num">' +
+              escHtml(String(Number(x && x.weight) || 0)) +
+              "</div></div>"
+            );
+          })
+          .join("") +
+        (kws.length ? '<div class="words">' + kws.map((k) => '<span class="word">' + escHtml(k) + "</span>").join("") + "</div>" : ""),
+    );
+  }
+  if (list(ai.todos).length) {
+    aiBlocks.push(
+      '<div class="sec">待办</div>' +
+        list(ai.todos)
+          .map((x) => '<div class="item"><b>' + escHtml((x && x.who) || "?") + "</b> · " + escHtml(x && x.what) + "</div>")
+          .join(""),
+    );
+  }
+  if (list(ai.risks).length) {
+    aiBlocks.push('<div class="sec">风险 / 争议</div>' + list(ai.risks).map((r) => '<div class="risk">• ' + escHtml(r) + "</div>").join(""));
+  }
+  // 情绪：单点退化为横条摘要、≥2 点才画柱 —— 与面板同一分支逻辑（日报只有一天时单点画不出曲线）
+  const senti = list(ai.sentiment).slice(0, 14).map((x) => ({
+    period: String((x && x.period) || ""),
+    score: Math.max(-100, Math.min(100, Number(x && x.score) || 0)),
+  }));
+  if (senti.length === 1) {
+    const p = senti[0];
+    const pos = p.score >= 0;
+    aiBlocks.push(
+      '<div class="sec">情绪<small>-100 负面 / +100 正面</small></div>' +
+        '<div class="senti-one"><span class="muted">' +
+        escHtml(p.period.slice(-5) || "—") +
+        '</span><span class="senti-one-track"><span class="senti-one-fill" style="width:' +
+        Math.abs(p.score) +
+        "%;background:" +
+        (pos ? ACCENT : "#ef4444") +
+        '"></span></span><span class="senti-v" style="color:' +
+        (pos ? ACCENT : "#ef4444") +
+        '">' +
+        (pos ? "+" : "") +
+        p.score +
+        "</span></div>",
+    );
+  } else if (senti.length >= 2) {
+    aiBlocks.push(
+      '<div class="sec">情绪曲线<small>-100 负面 / +100 正面</small></div>' +
+        '<div class="senti">' +
+        senti
+          .map(
+            (p) =>
+              '<div class="senti-col"><div class="senti-bar" style="height:' +
+              Math.max(4, Math.abs(p.score)) +
+              "%;background:" +
+              (p.score >= 0 ? ACCENT : "#ef4444") +
+              '"></div><div class="senti-k">' +
+              escHtml(p.period.slice(-5)) +
+              "</div></div>",
+          )
+          .join("") +
+        "</div>",
+    );
+  }
+  if (list(ai.controversies).length) {
+    aiBlocks.push(
+      '<div class="sec">争议指数</div>' +
+        list(ai.controversies)
+          .map((x) => {
+            const lv = Math.max(0, Math.min(5, Number(x && x.level) || 0));
+            return (
+              '<div class="item">• ' +
+              escHtml(x && x.topic) +
+              " " +
+              "★".repeat(lv) +
+              "☆".repeat(5 - lv) +
+              (x && x.reason ? ' <span class="muted">— ' + escHtml(x.reason) + "</span>" : "") +
+              "</div>"
+            );
+          })
+          .join(""),
+    );
+  }
   if (list(ai.titles).length) {
     aiBlocks.push(
-      '<div class="sec">称号</div>' +
+      '<div class="sec">AI 称号</div>' +
         list(ai.titles)
           .map((x) => '<div class="item"><b>' + escHtml(x.who) + "</b> · " + escHtml(x.title) + (x.reason ? '<span class="muted">（' + escHtml(x.reason) + "）</span>" : "") + "</div>")
           .join(""),
@@ -3737,16 +3902,10 @@ function WechatPanel({ api, locale }) {
       "",
       "开头导语：1-2 句话概括这段时间最核心的内容（让人 30 秒抓住重点，不要复述下面的分类）。",
       "",
-      "分类要点：根据实际内容**自行归纳** 3-6 个分类，每个分类标题带一个贴切的 emoji，例如：",
-      "- 🛠 工具技巧 / 实战经验",
-      "- 📦 资源推荐",
-      "- 📰 行业动态",
-      "- 💬 观点碰撞",
-      "- 😄 群友趣事",
-      "（分类名要贴合实际内容，不要生搬硬套；没有内容的分类不要出现；同一话题多人讨论要归并，不要逐条罗列）",
-      "",
     ];
+    AI_CATEGORY_RULES.forEach((x) => lines.push(x));
     AI_FORMAT_RULES.forEach((x) => lines.push(x));
+    AI_DATA_DISCIPLINE.forEach((x) => lines.push(x));
     lines.push("", "附加章节（按需，没有就不写）：");
     let idx = 1;
     if (dims.topics) lines.push(idx++ + ". 主要议题（分点，标注参与人）");
@@ -5750,7 +5909,7 @@ function WechatPanel({ api, locale }) {
           )
         : null,
 
-      // 群友称号（乐子版）：member_leaders 已给出各维度冠军，这里只做称号化展示
+      // 统计称号（乐子版）：member_leaders 已给出各维度冠军，这里只做称号化展示
       (() => {
         const fun = funTitles(stats);
         if (!fun.length) return null;
@@ -5758,7 +5917,13 @@ function WechatPanel({ api, locale }) {
         return h(
           "div",
           null,
-          h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "🎭"), "群友称号 · 乐子版"),
+          h(
+            "div",
+            { className: "swf-section", title: "由 MCP member_leaders 本地统计派生，与 AI 无关，不受「分析设置」的维度开关控制" },
+            h("span", { className: "swf-ico" }, "🎭"),
+            "统计称号",
+            h("span", { className: "swf-badge" }, "本地统计"),
+          ),
           h(
             "div",
             { className: "swf-fun" },
@@ -6377,7 +6542,11 @@ function WechatPanel({ api, locale }) {
             ),
           ),
         ),
-        h("div", { className: "swf-note" }, "关掉的维度不会写进提示词：Agent 不生成、报告也不出现（省 token）。"),
+        h(
+          "div",
+          { className: "swf-note" },
+          "关掉的维度不会写进提示词：Agent 不生成、报告也不出现（省 token）。本地统计卡片（成员榜、活跃热力、统计称号、成员画像的 KPI 与构成等）由代码算，不受这里控制。",
+        ),
         // 深挖参数：段数决定「读多细」，验证强度决定「查多狠」
         h(
           "div",
@@ -6537,9 +6706,11 @@ function WechatPanel({ api, locale }) {
             ),
           )
         : null,
-      // 结果：图表 + 正文（单轮与深挖共用同一渲染，展示哪个由档位决定）
+      // 结果：图表 + 正文 + 见解（单轮与深挖共用同一渲染，展示哪个由档位决定）
+      // 见解必须排在正文之后 —— 与长图 / Markdown 报告的「观察与建议（主观）」位置一致
       ...(aiChartNodes(shownAiData) || []),
       shownAiText ? h("div", { className: "swf-ai-out swf-ai-md" }, mdToReact(shownAiText)) : null,
+      ...(aiInsightNodes(shownAiData) || []),
       // 唯一的操作按钮：档位决定它跑哪条管线
       h(
         "div",
