@@ -1673,3 +1673,94 @@
 .swf-fun-title { font-size: 11px; opacity: 0.72; margin-top: 2px; }
 .swf-fun-who { font-size: 13px; font-weight: 600; margin-top: 1px; word-break: break-all; }
 .swf-fun-val { font-size: 11px; opacity: 0.6; font-variant-numeric: tabular-nums; }
+
+/* ---- 成员画像可读性增强（v0.32.8）：结论前置 hero / 标签胶囊 / 语义独立行 / 迷你轨迹 ---- */
+/* hero：头像 + 名字 + 一句话定性；AI 未跑时同一位置放统计摘要，结论始终在首屏 */
+.swf-member-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 6px 2px 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  border-left: 3px solid var(--swf-green);
+}
+.swf-member-hero-av {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+}
+.swf-member-hero-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.swf-member-hero-name {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  word-break: break-all;
+}
+.swf-member-hero-persona {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.9;
+}
+/* 人设标签胶囊：MBTI 单独配色，其余保持中性，避免整片抢眼 */
+.swf-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.swf-tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  background: var(--swf-active);
+  color: var(--swf-dim);
+}
+.swf-tag-mbti {
+  background: color-mix(in srgb, var(--swf-green) 22%, transparent);
+  color: var(--swf-green);
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+/* 社交关系行：与「待办清单」样式解耦，左侧绿线标记关系维度 */
+.swf-rel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  padding: 2px 6px;
+  margin: 2px 0;
+  font-size: 11.5px;
+  line-height: 1.65;
+  border-left: 2px solid var(--swf-green);
+}
+.swf-rel-who { font-weight: 600; }
+.swf-rel-why { opacity: 0.75; }
+/* 忠告行：与「争议星级」样式解耦，独立浅底块 */
+.swf-advice {
+  padding: 4px 9px;
+  margin: 3px 0;
+  border-radius: 6px;
+  background: var(--swf-bubble);
+  box-shadow: var(--swf-shadow);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+/* 成员级 24 小时轨迹：比群级趋势图矮一档，不与主图争视觉 */
+.swf-hours-sm { height: 56px; }
+

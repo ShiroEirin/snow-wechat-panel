@@ -448,7 +448,7 @@ function aiChartNodes(data) {
               ? h(
                   "div",
                   null,
-                  aiData.profile.advice.map((a, i) => h("div", { className: "swf-risk", key: "advice-" + i }, "→ ", String(a))),
+                  aiData.profile.advice.map((a, i) => h("div", { className: "swf-advice", key: "advice-" + i }, "→ ", String(a))),
                 )
               : null,
           )
@@ -3067,6 +3067,9 @@ function WechatPanel({ api, locale }) {
   // 成员榜维度 + 点击成员后按需拉取的单人画像（MCP 通用工具）
   const [rankMetric, setRankMetric] = useState("messages");
   const [memberProfile, setMemberProfile] = useState(null);
+  // 画像渲染在页面下方较远处：点击后置位，等 DOM 提交再滚过去（只滚一次，不打断手动浏览）
+  const memberProfileRef = useRef(null);
+  const memberScrollRef = useRef(false);
   const [memberBusy, setMemberBusy] = useState(false);
   // 角色维度 AI 分析（与群分析共用流式管线，靠 aiTargetRef 区分写入哪组状态）
   const [memberAiText, setMemberAiText] = useState("");
@@ -3730,6 +3733,16 @@ function WechatPanel({ api, locale }) {
     }
   }, [api, sessionId, memberProfile, memberAiStatus, memberAiText, memberAiData, memberAllTime]);
 
+  // 点击成员榜 / 查找结果后画像在下方较远处：等它渲染完成再滚过去，省掉用户手动翻找
+  useEffect(() => {
+    if (!memberScrollRef.current || !memberProfile || memberProfile.error) return;
+    memberScrollRef.current = false;
+    const el = memberProfileRef.current;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [memberProfile]);
+
   // 切会话 / 重开面板时把上次的总结读回来（绝不覆盖正在流式的会话）
   useEffect(() => {
     let alive = true;
@@ -4187,6 +4200,13 @@ function WechatPanel({ api, locale }) {
         "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：",
         "{",
         '  "persona": "一句话人物素描（与正文第 1 条同源，可带梗）",',
+        // 人设标签属于「称号」维度：开关关闭时不要求输出（与群分析 titles 同一口径，避免开关与产出打架）
+        ...(aiSettings.dims && aiSettings.dims.titles
+          ? [
+              '  "tags": ["人设标签（2-4 个，每个 2-6 字，如「表情包供应商」「深夜哲学家」）"],',
+              '  "mbti": "仅在聊天证据足够时填（如 INTP）；没把握就留空字符串，不要靠感觉硬套",',
+            ]
+          : []),
         '  "topics": [{"name": "关注点", "weight": 0, "keywords": ["关键词"]}],',
         '  "style": {"tone": "语气特征", "habits": ["口头禅或习惯"]},',
         '  "interactions": [{"with": "互动对象", "pattern": "互动模式"}],',
@@ -4194,7 +4214,11 @@ function WechatPanel({ api, locale }) {
         '  "advice": ["给管理员或本人的建议"]',
         "}",
         "",
-        "约束：topics 2-6 个（weight 取 0-100）；quotes 2-5 条且必须是原文逐字摘录；没有把握的字段给空数组 / 空字符串，不要编造。",
+        "约束：topics 2-6 个（weight 取 0-100）；quotes 2-5 条且必须是原文逐字摘录；" +
+          (aiSettings.dims && aiSettings.dims.titles
+            ? "tags 2-4 个且每个都要能在正文或发言里找到依据；mbti 没把握就留空（宁可留空也不要硬套）；"
+            : "") +
+          "没有把握的字段给空数组 / 空字符串，不要编造。",
         AI_JSON_CONTRACT,
         ...(String(aiSettings.extra || "").trim()
           ? ["", "补充要求（用户自定义，优先遵守）：", String(aiSettings.extra).trim()]
@@ -5499,12 +5523,14 @@ function WechatPanel({ api, locale }) {
                   ),
                 )
               : null,
-            h(
-              "div",
-              { className: "swf-card", title: "撤回类系统消息数量（发送者通常是系统/群账号）" },
-              h("div", { className: "swf-card-k" }, "撤回"),
-              h("div", { className: "swf-card-v" }, fmtNum((stats.system_events && stats.system_events.recall_like_count) || 0)),
-            ),
+            stats.system_events
+              ? h(
+                  "div",
+                  { className: "swf-card", title: "撤回类系统消息数量（发送者通常是系统/群账号）" },
+                  h("div", { className: "swf-card-k" }, "撤回"),
+                  h("div", { className: "swf-card-v" }, fmtNum(stats.system_events.recall_like_count || 0)),
+                )
+              : null,
           )
         : null,
 
@@ -5512,7 +5538,7 @@ function WechatPanel({ api, locale }) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-section" }, trend.title + " · " + periodLabel),
+            h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "📈"), trend.title + " · " + periodLabel),
             trend.kind === "hour"
               ? h(
                   "div",
@@ -5542,7 +5568,7 @@ function WechatPanel({ api, locale }) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-section" }, "参与度分布 · " + fmtNum(bucketTotal) + " 人参与"),
+            h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "📊"), "参与度分布 · " + fmtNum(bucketTotal) + " 人参与"),
             bucketOrder.map((k) =>
               h(
                 "div",
@@ -5563,7 +5589,7 @@ function WechatPanel({ api, locale }) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-section" }, t.types + (typeRows ? " · 范围内全量" : " · 样本")),
+            h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "🧩"), t.types + (typeRows ? " · 范围内全量" : " · 样本")),
             typeEntries.map(([k, v]) =>
               h(
                 "div",
@@ -5585,7 +5611,7 @@ function WechatPanel({ api, locale }) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-section" }, "活跃热力 · 星期 × 小时"),
+            h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "🔥"), "活跃热力 · 星期 × 小时"),
             h(
               "div",
               { className: "swf-heat" },
@@ -5674,7 +5700,7 @@ function WechatPanel({ api, locale }) {
             return h(
               "div",
               null,
-              h("div", { className: "swf-section" }, "成员榜 · 切换维度，点头像看发言分析"),
+              h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "🏆"), "成员榜 · 切换维度，点头像看发言分析"),
               h(
                 "div",
                 { className: "swf-mini-seg swf-mini-wrap" },
@@ -5711,6 +5737,7 @@ function WechatPanel({ api, locale }) {
                       if (memberProfile && memberProfile.member && memberProfile.member.username === uname) {
                         closeMemberProfile();
                       } else if (!memberBusy) {
+                        memberScrollRef.current = true;
                         loadMemberProfile(uname);
                       }
                     },
@@ -5747,7 +5774,7 @@ function WechatPanel({ api, locale }) {
         ? h(
             "div",
             null,
-            h("div", { className: "swf-section" }, "查找成员 · 按昵称 / 备注 / wxid（含未上榜成员）"),
+            h("div", { className: "swf-section" }, h("span", { className: "swf-ico" }, "🔎"), "查找成员 · 按昵称 / 备注 / wxid（含未上榜成员）"),
             h(
               "div",
               { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap", margin: "2px 4px 6px" } },
@@ -5817,7 +5844,10 @@ function WechatPanel({ api, locale }) {
                       key: "hit-" + m.username,
                       title: "点击查看 " + nm + "（" + m.username + "）的成员画像",
                       onClick: () => {
-                        if (!memberBusy) loadMemberProfile(m.username);
+                        if (!memberBusy) {
+                          memberScrollRef.current = true;
+                          loadMemberProfile(m.username);
+                        }
                       },
                     },
                     h(
@@ -5856,10 +5886,11 @@ function WechatPanel({ api, locale }) {
       memberProfile && !memberProfile.error
         ? h(
             "div",
-            null,
+            { ref: memberProfileRef },
             h(
               "div",
               { className: "swf-section swf-section-head" },
+              h("span", { className: "swf-ico" }, "🧑‍💼"),
               "成员画像 · " + ((memberProfile.member && memberProfile.member.display_name) || ""),
               h(
                 "button",
@@ -5867,6 +5898,47 @@ function WechatPanel({ api, locale }) {
                 "收起",
               ),
             ),
+            // hero：头像 + 一句话定性，把结论前置到首屏；AI 未跑时用统计摘要兜底
+            (() => {
+              const mm = memberProfile.member || {};
+              const sm = memberProfile.summary || {};
+              const uname = mm.username || "";
+              const nm = mm.display_name || uname;
+              const av = (uname && avatars[uname]) || "";
+              const persona = memberAiData && memberAiData.persona ? String(memberAiData.persona) : "";
+              const tags = memberAiData && Array.isArray(memberAiData.tags) ? memberAiData.tags : [];
+              const mbti = memberAiData && memberAiData.mbti ? String(memberAiData.mbti) : "";
+              const fallback =
+                "本群发言 " +
+                fmtNum(sm.messages) +
+                " 条" +
+                (sm.share_of_scope != null ? " · 占范围 " + fmtPct(sm.share_of_scope) : "") +
+                (sm.active_days ? " · 活跃 " + String(sm.active_days) + " 天" : "");
+              return h(
+                "div",
+                { className: "swf-member-hero" },
+                av
+                  ? h("img", { className: "swf-member-hero-av", src: av, alt: "" })
+                  : h("span", { className: "swf-member-hero-av", style: { background: speakerColor(nm) } }, avatarChar(nm)),
+                h(
+                  "div",
+                  { className: "swf-member-hero-main" },
+                  h("div", { className: "swf-member-hero-name" }, nm),
+                  h("div", { className: "swf-member-hero-persona" }, persona || fallback),
+                  persona && !tags.length && !mbti
+                    ? h("div", { className: "swf-note", style: { marginTop: "3px" } }, fallback)
+                    : null,
+                  tags.length || mbti
+                    ? h(
+                        "div",
+                        { className: "swf-tags" },
+                        mbti ? h("span", { className: "swf-tag swf-tag-mbti" }, mbti) : null,
+                        tags.slice(0, 4).map((x, i) => h("span", { className: "swf-tag", key: "mtag-" + i }, String(x))),
+                      )
+                    : null,
+                ),
+              );
+            })(),
             h(
               "div",
               { className: "swf-note", style: { margin: "0 4px 6px" } },
@@ -5875,36 +5947,117 @@ function WechatPanel({ api, locale }) {
             h(
               "div",
               { className: "swf-cards" },
-              h("div", { className: "swf-card" }, h("div", { className: "swf-card-k" }, "消息"), h("div", { className: "swf-card-v" }, fmtNum(memberProfile.summary.messages))),
-              h("div", { className: "swf-card" }, h("div", { className: "swf-card-k" }, "字数"), h("div", { className: "swf-card-v" }, fmtNum(memberProfile.summary.chars))),
-              h("div", { className: "swf-card" }, h("div", { className: "swf-card-k" }, "活跃天数"), h("div", { className: "swf-card-v" }, String(memberProfile.summary.active_days || 0))),
-              h("div", { className: "swf-card" }, h("div", { className: "swf-card-k" }, "范围内占比"), h("div", { className: "swf-card-v" }, fmtPct(memberProfile.summary.share_of_scope))),
+              h(
+                "div",
+                { className: "swf-card swf-card-accent" },
+                h("div", { className: "swf-card-k" }, h("span", { className: "swf-ico" }, "💬"), "消息"),
+                h("div", { className: "swf-card-v" }, fmtNum(memberProfile.summary.messages)),
+                memberProfile.summary.avg_length
+                  ? h("div", { className: "swf-card-sub" }, "均长 " + String(memberProfile.summary.avg_length) + " 字")
+                  : null,
+              ),
+              h(
+                "div",
+                { className: "swf-card" },
+                h("div", { className: "swf-card-k" }, h("span", { className: "swf-ico" }, "✍️"), "字数"),
+                h("div", { className: "swf-card-v" }, fmtNum(memberProfile.summary.chars)),
+                memberProfile.summary.longest
+                  ? h("div", { className: "swf-card-sub" }, "最长 " + fmtNum(memberProfile.summary.longest) + " 字")
+                  : null,
+              ),
+              h(
+                "div",
+                { className: "swf-card" },
+                h("div", { className: "swf-card-k" }, h("span", { className: "swf-ico" }, "📅"), "活跃天数"),
+                h("div", { className: "swf-card-v" }, String(memberProfile.summary.active_days || 0)),
+                memberProfile.summary.first_time
+                  ? h("div", { className: "swf-card-sub" }, "首次 " + String(memberProfile.summary.first_time).slice(0, 10))
+                  : null,
+              ),
+              h(
+                "div",
+                { className: "swf-card" },
+                h("div", { className: "swf-card-k" }, h("span", { className: "swf-ico" }, "📊"), "范围内占比"),
+                h("div", { className: "swf-card-v" }, fmtPct(memberProfile.summary.share_of_scope)),
+                memberProfile.summary.last_time
+                  ? h("div", { className: "swf-card-sub" }, "最近 " + String(memberProfile.summary.last_time).slice(0, 10))
+                  : null,
+              ),
             ),
-            // 消息构成 + 引用榜：统一用横条（口径写清，避免「连发」被误读成消息数占比）
+            // 时间节奏与内容构成分开：前者是「什么时候说」，后者是「说了什么」，两种口径不能混在一张榜里比大小
             (() => {
               const total = Number(memberProfile.summary.messages) || 0;
-              const mix = [
-                { name: "早起 6–8 时", count: memberProfile.rhythm.early_messages },
-                { name: "表情", count: memberProfile.media.emojis },
-                { name: "深夜 0–5 时", count: memberProfile.rhythm.night_messages },
-                { name: "引用消息", count: memberProfile.media.quotes_given },
-                { name: "图片", count: memberProfile.media.images },
-              ]
-                .filter((x) => Number(x.count) > 0)
-                .sort((a, b) => Number(b.count) - Number(a.count))
-                .map((x) => ({
-                  name: x.name,
-                  count: x.count,
-                  suffix: total ? " · " + fmtPct(Number(x.count) / total) : "",
-                }));
-              return mix.length
-                ? h(
-                    "div",
-                    null,
-                    h("div", { className: "swf-sub" }, "消息构成 · 分母 " + fmtNum(total) + " 条（同一条可计入多个维度）"),
-                    bars(mix, { key: "mix", wideNum: true }),
-                  )
-                : null;
+              const rhythm = memberProfile.rhythm || {};
+              const media = memberProfile.media || {};
+              const toBars = (arr) =>
+                arr
+                  .filter((x) => Number(x.count) > 0)
+                  .sort((a, b) => Number(b.count) - Number(a.count))
+                  .map((x) => ({
+                    name: x.name,
+                    count: x.count,
+                    suffix: total ? " · " + fmtPct(Number(x.count) / total) : "",
+                  }));
+              const timeMix = toBars([
+                { name: "早起 6–8 时", count: rhythm.early_messages },
+                { name: "深夜 0–5 时", count: rhythm.night_messages },
+              ]);
+              const contentMix = toBars([
+                { name: "表情", count: media.emojis },
+                { name: "图片", count: media.images },
+                { name: "引用消息", count: media.quotes_given },
+                { name: "文件", count: media.files },
+                { name: "视频", count: media.videos },
+              ]);
+              if (!timeMix.length && !contentMix.length) return null;
+              return h(
+                "div",
+                null,
+                timeMix.length
+                  ? h(
+                      "div",
+                      null,
+                      h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🕒"), "时间节奏 · 分母 " + fmtNum(total) + " 条"),
+                      bars(timeMix, { key: "mtime", wideNum: true }),
+                    )
+                  : null,
+                contentMix.length
+                  ? h(
+                      "div",
+                      null,
+                      h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🧩"), "内容构成 · 同一条可计入多个维度"),
+                      bars(contentMix, { key: "mcontent", wideNum: true }),
+                    )
+                  : null,
+              );
+            })(),
+            // 成员级 24 小时轨迹：get_member_profile 早已返回 hourly_distribution，此前未渲染
+            (() => {
+              const hd = memberProfile.hourly_distribution || {};
+              const pts = [];
+              for (let i = 0; i < 24; i += 1) {
+                const v = hd[i] != null ? hd[i] : hd[String(i)];
+                pts.push({ hour: i, count: Number(v) || 0 });
+              }
+              const max = pts.reduce((a, p) => Math.max(a, p.count), 0);
+              if (!max) return null;
+              return h(
+                "div",
+                null,
+                h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🕛"), "活跃轨迹 · 24 小时分布"),
+                h(
+                  "div",
+                  { className: "swf-hours swf-hours-sm" },
+                  pts.map((p) =>
+                    h(
+                      "div",
+                      { className: "swf-hour", key: "mh-" + p.hour, title: p.hour + ":00 — " + fmtNum(p.count) + " 条" },
+                      h("div", { className: "swf-hour-bar", style: { height: (p.count / max) * 100 + "%" } }),
+                      p.hour % 3 === 0 ? h("div", { className: "swf-hour-k" }, String(p.hour)) : null,
+                    ),
+                  ),
+                ),
+              );
             })(),
             memberProfile.rhythm.bursts
               ? h(
@@ -6018,7 +6171,12 @@ function WechatPanel({ api, locale }) {
                   null,
                   h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🤝"), "社交位置"),
                   memberAiData.interactions.map((x, i) =>
-                    h("div", { className: "swf-todo", key: "mint-" + i }, h("b", null, String(x.with || "?")), " · ", String(x.pattern || "")),
+                    h(
+                      "div",
+                      { className: "swf-rel", key: "mint-" + i },
+                      h("span", { className: "swf-rel-who" }, String(x.with || "?")),
+                      h("span", { className: "swf-rel-why" }, String(x.pattern || "")),
+                    ),
                   ),
                 )
               : null,
@@ -6043,7 +6201,7 @@ function WechatPanel({ api, locale }) {
                   "div",
                   null,
                   h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🎯"), "一句忠告"),
-                  memberAiData.advice.map((x, i) => h("div", { className: "swf-risk", key: "madv-" + i }, "→ ", String(x))),
+                  memberAiData.advice.map((x, i) => h("div", { className: "swf-advice", key: "madv-" + i }, "→ ", String(x))),
                 )
               : null,
             memberAiText
