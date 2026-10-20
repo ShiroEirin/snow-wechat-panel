@@ -317,6 +317,22 @@ function aiChartNodes(data) {
       aiData && typeof aiData.summary === "string" && aiData.summary.trim()
         ? h("div", { className: "swf-lead" }, aiData.summary.trim())
         : null,
+      // 要点速览：结论前置（BLUF），3-5 条可核验要点 —— 读者第一眼要的是「发生了什么」
+      aiData && Array.isArray(aiData.key_points) && aiData.key_points.length
+        ? h(
+            "div",
+            null,
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "📌"), "要点速览"),
+            aiData.key_points.slice(0, 6).map((x, i) =>
+              h(
+                "div",
+                { className: "swf-point", key: "hl-" + i },
+                h("span", { className: "swf-point-n" }, String(i + 1)),
+                h("span", null, String(x)),
+              ),
+            ),
+          )
+        : null,
       aiData && Array.isArray(aiData.topics) && aiData.topics.length
         ? h(
             "div",
@@ -498,6 +514,9 @@ function aiJsonFields(dims, limits) {
   // summary 永远输出：它是长图 / 面板的导语卡，也是「AI 只做语义」的最小载体。
   // 注意 heat_hours 已移除 —— 小时热度由本地 SQL 精确聚合，让模型去「估热度」既不准也浪费 token。
   const fields = ['  "summary": "一句话摘要（30 字以内，抓住当天最核心的事）"'];
+  // 要点速览：紧跟导语，形成「一句话 → 3-5 条」的粒度递进（渲染在开头）
+  // 字段名用 key_points 而不是 highlights —— MCP 的 stats.highlights 是「金句候选」，同名会混淆
+  fields.push('  "key_points": ["要点（3-5 条，每条一句话，可核验的事实或结论）"]');
   if (d.topics) fields.push('  "topics": [{"name": "话题名", "weight": 0, "keywords": ["关键词"]}]');
   if (d.todos) fields.push('  "todos": [{"who": "谁", "what": "要做什么"}]');
   if (d.risks) fields.push('  "risks": ["风险或争议点"]');
@@ -506,6 +525,8 @@ function aiJsonFields(dims, limits) {
   if (d.titles) fields.push('  "titles": [{"who": "谁", "title": "称号", "reason": "依据"}]');
   if (d.quotes) fields.push('  "quotes": [{"who": "谁", "text": "原话", "why": "为什么值得记住"}]');
   if (d.profile) fields.push('  "profile": {"summary": "群画像一句话", "style": "交流风格", "advice": ["行动建议"]}');
+  // 观察与建议：放结尾 —— 主观判断必须在事实之后，读者先看依据再看判断
+  fields.push('  "insights": ["见解（2-3 条，主观判断与建议，每条要能指出依据）"]');
   return fields;
 }
 
@@ -1960,6 +1981,9 @@ const REPORT_CSS =
     ".hero h1{margin:0;font-size:23px;line-height:1.3;font-weight:700}" +
     ".hero-range{font-size:12px;opacity:.86;margin-top:6px;font-variant-numeric:tabular-nums}" +
     ".hero-lead{margin-top:14px;font-size:13.5px;line-height:1.7;background:rgba(255,255,255,.14);border-radius:10px;padding:11px 13px;border-left:3px solid rgba(255,255,255,.55)}" +
+    ".hero-points{margin-top:10px;display:grid;gap:6px}" +
+    ".hero-points .hp{display:flex;gap:8px;align-items:baseline;font-size:13px;line-height:1.65;background:rgba(255,255,255,.10);border-radius:8px;padding:8px 11px}" +
+    ".hero-points .hp-n{flex:0 0 auto;width:17px;height:17px;border-radius:50%;background:rgba(255,255,255,.28);font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center}" +
     ".kpis{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}" +
     ".kpi{flex:1 1 116px;background:rgba(255,255,255,.14);border-radius:10px;padding:9px 12px}" +
     ".kpi .k{font-size:11px;opacity:.85}" +
@@ -2146,6 +2170,15 @@ function buildReportHtml(opts) {
           .join(""),
     );
   }
+  // 观察与建议：主观判断收尾（与面板、报告同序）
+  if (list(ai.insights).length) {
+    aiBlocks.push(
+      '<div class="sec">观察与建议<small>主观</small></div>' +
+        list(ai.insights)
+          .map((x) => '<div class="item">→ ' + escHtml(x) + "</div>")
+          .join(""),
+    );
+  }
 
   return (
     "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
@@ -2157,6 +2190,14 @@ function buildReportHtml(opts) {
     "<h1>" + escHtml(o.title || "群聊报告") + "</h1>" +
     '<div class="hero-range">' + escHtml(o.rangeLabel || "") + "</div>" +
     (lead ? '<div class="hero-lead">' + escHtml(lead) + "</div>" : "") +
+    (list(ai.key_points).length
+      ? '<div class="hero-points">' +
+        list(ai.key_points)
+          .slice(0, 6)
+          .map((x, i) => '<div class="hp"><span class="hp-n">' + (i + 1) + "</span>" + escHtml(x) + "</div>")
+          .join("") +
+        "</div>"
+      : "") +
     '<section class="kpis">' +
     '<div class="kpi"><div class="k">💬 消息</div><div class="v">' + escHtml(fmtNum(total)) + "</div></div>" +
     '<div class="kpi"><div class="k">👥 发言人数</div><div class="v">' + escHtml(fmtNum(senders)) + "</div></div>" +
@@ -2253,7 +2294,8 @@ function buildMemberHtml(opts) {
   );
 }
 
-/** 成员导出的文件名主干：wechat-成员-<群>-<成员>-<日期>（不含扩展名）。 */
+/** 成员导出的文件名主干：wechat-成员-<群>-<成员>-<日期-时刻>（不含扩展名）。
+    带时分秒是为了同一天多次导出（例如换档位重跑后想两版对比）不会互相覆盖。 */
 function memberFileStem(groupName, memberName) {
   return (
     "wechat-成员-" +
@@ -2261,7 +2303,7 @@ function memberFileStem(groupName, memberName) {
     "-" +
     safeFileName(memberName || "member", "member") +
     "-" +
-    todayStr().replace(/-/g, "")
+    fileStamp()
   );
 }
 
@@ -2273,6 +2315,26 @@ function timeStr(d) {
 }
 function todayStr() {
   return dateStr(new Date());
+}
+/** 导出文件名用的时间戳 YYYYMMDD-HHmmss（不含冒号，可安全用于 Windows 文件名）。
+    导出文件名此前只带日期，同一天重新分析后再保存会**静默覆盖**上一版 —— 补上时分秒即可多版共存。 */
+function fileStamp(d) {
+  const t = d || new Date();
+  return (
+    t.getFullYear() +
+    pad2(t.getMonth() + 1) +
+    pad2(t.getDate()) +
+    "-" +
+    pad2(t.getHours()) +
+    pad2(t.getMinutes()) +
+    pad2(t.getSeconds())
+  );
+}
+/** 导出文件名用的时刻 HHmmss（不含冒号，Windows 文件名安全）。
+    群报告文件名里已有「范围起始日」，所以这里只补时刻，避免日期出现两遍。 */
+function timeStamp(d) {
+  const t = d || new Date();
+  return pad2(t.getHours()) + pad2(t.getMinutes()) + pad2(t.getSeconds());
 }
 /* 定时日报提示词：由宿主「定时任务」的 AI Loop 执行（面板本身不常驻）。
    幂等设计：同名文件已存在就跳过，因此「补发检查」可以反复运行而不会重复生成。 */
@@ -4592,6 +4654,12 @@ function WechatPanel({ api, locale }) {
     lines.push("# " + periodLabel + " · " + name);
     lines.push("");
     lines.push("- 时间范围：" + rangeStart + " ~ " + rangeEnd);
+    // 要点速览：结论前置，放报告最前（读者先知道「发生了什么」，再看依据）
+    if (reportSections.ai && aiData && Array.isArray(aiData.key_points) && aiData.key_points.length) {
+      lines.push("");
+      lines.push("## 要点速览");
+      aiData.key_points.forEach((x, i) => lines.push(i + 1 + ". " + String(x)));
+    }
     if (reportSections.overview) {
       lines.push(
         "- 消息：" + fmtNum(d.total_messages || 0) +
@@ -4713,6 +4781,13 @@ function WechatPanel({ api, locale }) {
       }
     }
 
+    // 观察与建议：主观判断收尾（与面板同序：先事实、后判断）
+    if (reportSections.ai && aiData && Array.isArray(aiData.insights) && aiData.insights.length) {
+      lines.push("");
+      lines.push("## 观察与建议（主观）");
+      aiData.insights.forEach((x) => lines.push("- " + String(x)));
+    }
+
     lines.push("");
     lines.push("---");
     lines.push("由 Snow App「微信群聊」面板生成 · " + new Date().toLocaleString());
@@ -4745,6 +4820,8 @@ function WechatPanel({ api, locale }) {
         safeFileName((current && current.display_name) || sessionId, "wechat") +
         "-" +
         rangeStart.slice(0, 10).replace(/-/g, "") +
+        "-" +
+        timeStamp() +
         ".md";
       const sep = /[\\/]$/.test(root) ? "" : root.indexOf("\\") >= 0 ? "\\" : "/";
       const filePath = root + sep + name;
@@ -4790,6 +4867,8 @@ function WechatPanel({ api, locale }) {
         safeFileName((current && current.display_name) || sessionId, "wechat") +
         "-" +
         rangeStart.slice(0, 10).replace(/-/g, "") +
+        "-" +
+        timeStamp() +
         ".html";
       const sep = /[\\/]$/.test(root) ? "" : root.indexOf("\\") >= 0 ? "\\" : "/";
       const filePath = root + sep + name;
