@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -206,6 +206,13 @@ const briefSys = lib.buildStatsBrief(
 ok("撤回/系统消息读真实字段名", briefSys.indexOf("19 / 19") >= 0);
 ok("不再输出假的 0 / 0", briefSys.indexOf("0 / 0") < 0);
 
+
+console.log("quoteCharsHint（引用搬运提示）");
+// 回归：chars 只算自己说的话、chars_total 含被引原文；差距明显时才提示。
+ok("差距明显时提示含引用字数", lib.quoteCharsHint({ chars: 2456, chars_total: 6605 }) === "含引用 4149 字");
+ok("差距不大时不打扰", lib.quoteCharsHint({ chars: 100, chars_total: 105 }) === "");
+ok("没有 chars_total 时为空串", lib.quoteCharsHint({ chars: 100 }) === "");
+ok("chars_total 小于等于 chars 时为空串", lib.quoteCharsHint({ chars: 100, chars_total: 100 }) === "");
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);
 process.exit(fail === 0 ? 0 : 1);

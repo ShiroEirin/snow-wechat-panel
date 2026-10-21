@@ -1691,6 +1691,20 @@ function fmtPct(v) {
   const n = Number(v);
   return Number.isFinite(n) ? (n * 100).toFixed(1) + "%" : "—";
 }
+/** 引用搬运提示：MCP 的 chars 只算「自己说的话」（已剥掉引用前缀），
+    chars_total 是含被引原文的总长度。两者差距明显时，说明该成员的字数里有相当一部分
+    是「转引别人的话」—— 这正是「话痨之王」看起来名不副实的根源（实测某成员 6605 字里
+    只有 2456 字是自己说的，63% 是引用）。返回空串表示无需提示。 */
+function quoteCharsHint(summary) {
+  const own = Number(summary && summary.chars) || 0;
+  const all = Number(summary && summary.chars_total) || 0;
+  if (!all || all <= own) return "";
+  const diff = all - own;
+  // 差得太少不值得占一行（<20 字，或不到自身字数的 15%）
+  if (diff < 20 || diff < own * 0.15) return "";
+  return "含引用 " + fmtNum(diff) + " 字";
+}
+
 /* 统计称号（乐子版）：member_leaders 的字段 → 图标 / 称号 / 单位 */
 const FUN_TITLES = [
   ["messages", "💦", "水群王", "条"],
@@ -2146,6 +2160,8 @@ const REPORT_CSS =
     ".kpi{flex:1 1 116px;background:rgba(255,255,255,.14);border-radius:10px;padding:9px 12px}" +
     ".kpi .k{font-size:11px;opacity:.85}" +
     ".kpi .v{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}" +
+    // 副行：解释「字数」里有部分是引用搬运（chars_total - chars）
+    ".kpi .kpi-sub{font-size:10.5px;opacity:.75;margin-top:1px}" +
     ".body{padding:6px 30px 26px}" +
     // 章节标题：左侧色条（emoji 由 AI 写在标题里，样式统一由这里给）
     ".sec{margin:26px 0 12px;font-size:14px;font-weight:700;color:#111827;padding-left:10px;border-left:3px solid #16a34a;line-height:1.4}" +
@@ -2551,7 +2567,9 @@ function buildMemberHtml(opts) {
     (lead ? '<div class="hero-lead">' + escHtml(lead) + "</div>" : "") +
     '<section class="kpis">' +
     '<div class="kpi"><div class="k">💬 消息</div><div class="v">' + escHtml(fmtNum(total)) + "</div></div>" +
-    '<div class="kpi"><div class="k">✍️ 字数</div><div class="v">' + escHtml(fmtNum(Number(s.chars) || 0)) + "</div></div>" +
+    '<div class="kpi"><div class="k">✍️ 字数</div><div class="v">' + escHtml(fmtNum(Number(s.chars) || 0)) + "</div>" +
+    (quoteCharsHint(s) ? '<div class="kpi-sub">' + escHtml(quoteCharsHint(s)) + "</div>" : "") +
+    "</div>" +
     '<div class="kpi"><div class="k">📅 活跃天数</div><div class="v">' + escHtml(String(s.active_days || 0)) + "</div></div>" +
     '<div class="kpi"><div class="k">📊 范围内占比</div><div class="v">' + escHtml(fmtPct(s.share_of_scope)) + "</div></div>" +
     "</section></header>" +
@@ -4647,6 +4665,7 @@ function WechatPanel({ api, locale }) {
     lines.push("## 统计事实（MCP 全量聚合）");
     lines.push(
       "- 消息 " + fmtNum(total) + " 条 · 字数 " + fmtNum(Number(s.chars) || 0) +
+      (quoteCharsHint(s) ? "（" + quoteCharsHint(s) + "）" : "") +
       " · 活跃天数 " + (s.active_days || 0) + " · 范围内占比 " + fmtPct(s.share_of_scope),
     );
     if (s.first_time || s.last_time) lines.push("- 首末消息：" + (s.first_time || "—") + " → " + (s.last_time || "—"));
@@ -6322,9 +6341,12 @@ function WechatPanel({ api, locale }) {
                 { className: "swf-card" },
                 h("div", { className: "swf-card-k" }, h("span", { className: "swf-ico" }, "✍️"), "字数"),
                 h("div", { className: "swf-card-v" }, fmtNum(memberProfile.summary.chars)),
-                memberProfile.summary.longest
-                  ? h("div", { className: "swf-card-sub" }, "最长 " + fmtNum(memberProfile.summary.longest) + " 字")
-                  : null,
+                // 引用搬运明显时优先提示它（能解释「字数高但不像话痨」），否则显示最长一条
+                quoteCharsHint(memberProfile.summary)
+                  ? h("div", { className: "swf-card-sub" }, quoteCharsHint(memberProfile.summary))
+                  : memberProfile.summary.longest
+                    ? h("div", { className: "swf-card-sub" }, "最长 " + fmtNum(memberProfile.summary.longest) + " 字")
+                    : null,
               ),
               h(
                 "div",
