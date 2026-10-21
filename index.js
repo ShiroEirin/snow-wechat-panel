@@ -21,7 +21,6 @@ const MCP_SERVER = "wechat";
 const PAGE_LIMIT = 200;
 const ACCENT = "#3b82f6";
 // 深度分析：轮询兜底超时上限（模型不按契约输出时也要收口）
-const AI_DONE_STATUSES = ["done", "completed", "complete", "finished", "success", "succeeded", "idle", "error", "failed"];
 const AI_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 // 同步成功的提示 3 秒后淡出（与 style.css 的 .swf-syncmsg-ok 动画时长对齐）
 const SYNC_OK_FADE_MS = 3000;
@@ -214,17 +213,14 @@ function readAiMessage(data) {
 
   const text = pick.text;
   const status = String(pick.msg.status || "").toLowerCase();
-  // 会话级流式状态：messages 域顶层 live（同 runtime.conversation）。
-  // 订阅推送与轮询读取都应带上；缺失时只能靠「正文带结构化数据」判完成。
-  const live = (data && data.live) || null;
-  const streamingKnown = !!(live && typeof live.isStreaming === "boolean");
-  // 完成判定只认两类硬信号：
-  //   ① 正文已带完整结构化数据（AI_JSON_CONTRACT 要求成稿必须输出）
-  //   ② 会话明确已不在流式（live.isStreaming === false）—— 模型没按契约输出 JSON 时
-  //      也要收口，否则只能一直等到 10 分钟超时
-  // **不再**用单条消息的 status 判完成：Agent 常先发一句「先取数…」再调工具，
-  // 这条消息同样是 completed，提前收口会把开场白当成成稿（实测故障：成员分析只剩一句话）。
-  const done = !!text && (pick.hasJson || (streamingKnown && !live.isStreaming));
+  // 完成判定只认「正文带完整结构化数据」这一个信号 —— AI_JSON_CONTRACT 要求成稿必须输出，
+  // 实测正常成稿 100% 命中。另外两个信号都**不能用**：
+  //   ① 单条消息的 status：Agent 先发一句「先取数…」再调工具，这条同样是 completed；
+  //      （实测：成员分析 19:22:27 的开场白 27 字就把它判成终局，19:23:18 的 3605 字成稿永远没被读到）
+  //   ② messages 域的 live：它是**焦点会话**状态，后台新建的会话不反映 ——
+  //      早期实现用它判完成，第一次轮询就误判「已完成」并停掉轮询（见下方 applyAiPayload 上方注释）。
+  // 模型真没按契约输出时，由 10 分钟轮询超时收口并提示「可点『打开会话』」。
+  const done = !!text && pick.hasJson;
   return {
     text: text,
     status: status,
@@ -3971,8 +3967,12 @@ function WechatPanel({ api, locale }) {
           try {
             const saved = await api.storage.getJson(memberSummaryKey(sessionId, username));
             if (memberGenRef.current !== gen) return;
-            if (saved && saved.text && !!saved.allTime === allTime) {
-              setMemberAiText(saved.text);
+            const savedText = String((saved && saved.text) || "");
+            // 旧版（v0.32.17 及以前）可能在「开场白被当成成稿」时落盘了无效缓存：
+            // 没有结构化数据、正文又很短 —— 忽略它，否则重开面板只会看到一句「别催」。
+            const savedUsable = !!(saved && saved.data) || savedText.length >= 200;
+            if (saved && savedText && savedUsable && !!saved.allTime === allTime) {
+              setMemberAiText(savedText);
               setMemberAiData(saved.data || null);
               setMemberAiStatus("done");
               setMemberAiMsg("已恢复上次分析结果（" + new Date(saved.at || Date.now()).toLocaleString() + "）");
@@ -4167,6 +4167,8 @@ function WechatPanel({ api, locale }) {
       .then(() => (api.storage && api.storage.getJson ? api.storage.getJson(summaryKey(sessionId)) : null))
       .then((saved) => {
         if (!alive || !saved || !saved.text) return;
+        // 同成员分析：没有结构化数据又很短 = 旧版误收口的开场白，不回填
+        if (!saved.data && String(saved.text).length < 200) return;
         setAiText((prev) => prev || saved.text);
         setAiData((prev) => prev || saved.data || null);
         setAiStatus((prev) => (prev === "streaming" ? prev : "done"));

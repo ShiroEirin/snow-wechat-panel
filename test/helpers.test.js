@@ -122,11 +122,31 @@ ok("空正文不算完成", aiMsg("", "").done === false);
 
 // 回归：单条消息 status=completed 不能当「整轮完成」
 // Agent 常先发一句「先取数…」并调工具，这条消息同样是 completed；
-// 早期用消息 status 判完成会立刻退订 + 停轮询，成稿永远读不到（实测成员分析只剩一句话）。
-ok("消息 status 完成但会话仍在流式 -> 不算完成", aiMsg("随便写点", "done", { isStreaming: true }).done === false);
-ok("会话明确已结束才收口（即使没有 JSON）", aiMsg("随便写点", "done", { isStreaming: false }).done === true);
-ok("无 live 且无 JSON -> 不判完成（交给超时兜底）", aiMsg("随便写点", "done").done === false);
-ok("带结构化数据立即完成（不必等会话结束）", aiMsg('{"risks":[]}', "completed", { isStreaming: true }).done === true);
+// 早期用消息 status 判完成会立刻退订 + 停轮询，成稿永远读不到。
+// live 也不能用：它是**焦点会话**状态，后台新建的会话不反映。
+ok("消息 status=completed 不再单独判完成（开场白不是成稿）", aiMsg("随便写点", "completed").done === false);
+ok("live.isStreaming=false 也不算完成（live 是焦点会话，不可信）", aiMsg("随便写点", "done", { isStreaming: false }).done === false);
+ok("带结构化数据才完成", aiMsg('{"risks":[]}', "completed").done === true);
+
+// 真实形态回归（会话 conv-1792581739059931300-40484 的实际结构）：
+// 两条带工具调用的开场白（27 / 46 字）+ 两条 tool 结果 + 一条 3605 字成稿。
+// 旧逻辑在第一条开场白处就判完成 -> 面板与导出长图只显示一句「别催」。
+ok(
+  "真实形态：开场白 + 工具结果 + 成稿 -> 选成稿且判完成",
+  (() => {
+    const r = lib.readAiMessage({
+      items: [
+      { role: "user", content: "提示词" },
+      { role: "assistant", content: "本小姐先取出数据，再谈评价……笨蛋，别催。", status: "completed", toolCallsJson: "[]" },
+      { role: "tool", content: '{"content":[{"text":"huge"}]}' },
+      { role: "assistant", content: "本小姐要把剩下那批都取出来，哼。", status: "completed", toolCallsJson: "[]" },
+      { role: "tool", content: '{"content":[{"text":"huge"}]}' },
+      { role: "assistant", content: '## 一句话定性\n正文内容\n<<<AI_JSON>>>\n{"persona":"x"}\n<<<END>>>', status: "completed" },
+      ],
+    });
+    return r.text.indexOf("一句话定性") >= 0 && r.done === true && r.hasJson === true;
+  })(),
+);
 ok("只有工具调用 -> toolPending", lib.readAiMessage({ items: [{ role: "assistant", content: "", toolCallsJson: "[]" }] }).toolPending === true);
 
 // 回归：messages 域的 items 顺序未被官方文档承诺，而 Agent 常先用一条 assistant 消息
