@@ -1666,11 +1666,34 @@ const FUN_TITLES = [
   ["quoted", "🎯", "众矢之的", "次被引"],
   ["quotes_given", "🔁", "引用狂魔", "次引用"],
   ["night", "🌙", "深夜诗人", "条"],
-  ["early", "🌅", "早起冠军", "条"],
+  // 「早班车劳模」= 6–8 点发言条数（口径是「话多」，不是「起得早」，称号必须说出来）
+  ["early", "🚌", "早班车劳模", "条"],
+  // 「早起冠军」= 早晨 6–8 点最早的发言时刻（真正的「谁先开口」）
+  ["early_first", "🌅", "早起冠军", ""],
   ["recall_like_events", "🫥", "撤回大师", "次"],
 ];
 
-/** 从 member_leaders 取各维度冠军，拼成「统计称号」列表（值为 0 的维度跳过） */
+/** 各维度的封号门槛：低于此值不颁发 —— 稀疏维度硬凑称号只会闹笑话。
+    实测过的两处：① 全群仅 2 条视频时，发 1 个视频的人被封「视频UP主」；
+    ② 全天 19 次撤回分散在 19 人身上，撤回 1 次的人被封「撤回大师」。 */
+const FUN_TITLE_MIN = {
+  messages: 10,
+  chars: 500,
+  bursts: 5,
+  emojis: 3,
+  images: 3,
+  videos: 2,
+  quoted: 3,
+  quotes_given: 3,
+  night: 10,
+  early: 5,
+  early_first: 1,
+  recall_like_events: 2,
+};
+
+/** 从 member_leaders 取各维度冠军，拼成「统计称号」列表。
+    三条过滤：① 0 值跳过 ② 低于维度门槛跳过 ③ **并列不封号**（冠军不唯一 = 没有冠军）。
+    并列判定依赖 MCP 返回的 tied 标记；旧版 MCP 不返回该字段时按「不并列」处理。 */
 function funTitles(stats) {
   const ml = (stats && stats.member_leaders) || {};
   const out = [];
@@ -1679,13 +1702,19 @@ function funTitles(stats) {
     const arr = Array.isArray(ml[key]) ? ml[key] : [];
     const top = arr[0];
     if (!top || !(Number(top.value) > 0)) return;
+    if (top.tied) return;
+    const value = Number(top.value) || 0;
+    const min = FUN_TITLE_MIN[key];
+    if (min != null && value < min) return;
     out.push({
       key: key,
       icon: row[1],
       title: row[2],
       unit: row[3],
       who: top.display_name || top.username || "?",
-      value: Number(top.value) || 0,
+      value: value,
+      // 早起冠军用 HH:MM（MCP 已转好），其余维度用计数
+      label: String(top.label || ""),
     });
   });
   return out;
@@ -2175,7 +2204,11 @@ function buildReportHtml(opts) {
   const avatarMap = o.avatarMap || {};
   const total = Number(stats.total_messages) || 0;
   const senders = Number(stats.unique_senders) || 0;
-  const perCapita = senders ? Math.round(total / senders) : 0;
+  // 人均分母是「发言人数」（已排除群自身），分子也必须同口径排除群自身消息，
+  // 否则 total_messages 里的系统消息会把人均抬高。
+  const groupSelf = Number((stats.system_events && stats.system_events.group_self_messages) || 0);
+  const humanTotal = Math.max(0, total - groupSelf);
+  const perCapita = senders ? Math.round(humanTotal / senders) : 0;
   const points = (o.trend && o.trend.points) || [];
   const peak = points.reduce((a, p) => (p.value > a.value ? p : a), { value: 0, key: "" });
   const peakShort = String(peak.key).length > 10 ? String(peak.key).slice(11) : String(peak.key);
@@ -5643,7 +5676,11 @@ function WechatPanel({ api, locale }) {
         ? String(peakPoint.key).slice(11)
         : peakPoint.key;
 
-    const perCapita = uniqueSenders ? Math.round((Number(stats.total_messages) || 0) / uniqueSenders) : 0;
+    // 人均：分子扣掉群自身消息，与分母 uniqueSenders（不含群自身）保持同口径
+    const groupSelfMsgs = Number((stats.system_events && stats.system_events.group_self_messages) || 0);
+    const perCapita = uniqueSenders
+      ? Math.round(Math.max(0, (Number(stats.total_messages) || 0) - groupSelfMsgs) / uniqueSenders)
+      : 0;
 
     // 类型分布：MCP 全量 type_distribution（[{local_type,label,count}]）→ 按 label 合并
     const typeEntries = typeRows ? mergeTypeRows(typeRows) : [];
@@ -5937,12 +5974,12 @@ function WechatPanel({ api, locale }) {
                 {
                   className: "swf-fun-card",
                   key: "fun-" + x.key,
-                  title: x.title + "：" + x.who + " " + x.value + " " + x.unit,
+                  title: x.title + "：" + x.who + " " + (x.label || x.value + " " + x.unit),
                 },
                 h("div", { className: "swf-fun-ico" }, x.icon),
                 h("div", { className: "swf-fun-title" }, x.title),
                 h("div", { className: "swf-fun-who" }, x.who),
-                h("div", { className: "swf-fun-val" }, fmtNum(x.value) + " " + x.unit),
+                h("div", { className: "swf-fun-val" }, x.label || fmtNum(x.value) + " " + x.unit),
               ),
             ),
           ),
@@ -6285,11 +6322,13 @@ function WechatPanel({ api, locale }) {
                   }));
               // 时间节奏：只有「早起 / 深夜」两个对称维度 —— 0 值必须显示（过滤掉一个会被误读成漏项），
               // 且按时间顺序固定排列：这是时间轴语义，不是排行榜，所以既不排序也不发奖牌。
+              // 边界写清楚：night = 小时 < 6（00:00–05:59），early = 小时 6..8（06:00–08:59），
+              // 用「左闭右开」表述避免「6–8 时」被读成 06:00–08:00。
               const hasRhythm = rhythm.early_messages != null || rhythm.night_messages != null;
               const timeMix = hasRhythm
                 ? [
-                    { name: "早起 6–8 时", count: Number(rhythm.early_messages) || 0 },
-                    { name: "深夜 0–5 时", count: Number(rhythm.night_messages) || 0 },
+                    { name: "早起 6–9 时", count: Number(rhythm.early_messages) || 0 },
+                    { name: "深夜 0–6 时", count: Number(rhythm.night_messages) || 0 },
                   ].map((x) => ({
                     name: x.name,
                     count: x.count,
