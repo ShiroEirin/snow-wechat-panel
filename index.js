@@ -175,21 +175,50 @@ function lastJsonObject(text) {
   return null;
 }
 
-/** 从 messages 域载荷里读出「最后一条 assistant 消息」的正文与完成状态。
-    单轮深度分析与深挖流水线共用，避免两处完成判定分叉。 */
+/** 从 messages 域载荷里读出 AI 的**成稿**正文与完成状态。
+    单轮深度分析与深挖流水线共用，避免两处完成判定分叉。
+
+    ⚠️ 不能假设 items 的顺序，也不能只取「最后一条 assistant」——
+    实测 Agent 会先用一条 assistant 消息说「先取数…」并调用工具，随后才输出正文 +
+    结构化数据；而官方文档只声明 items 是「消息列表」，**不承诺顺序**。
+    早期实现取 assistants[length-1]，在倒序返回时抓到的正是那句开场白，
+    面板与导出长图就只剩一句话（真实故障）。
+
+    挑选顺序：
+      ① 带完整结构化数据的那条（成稿的强特征：<<<AI_JSON>>> / ```json 围栏 / 可解析对象）
+      ② 否则取正文最长的一条（中间过程通常很短）
+      ③ 都没有时退回最后一条 */
 function readAiMessage(data) {
   if (!data || typeof data !== "object") return null;
   const items = Array.isArray(data.items) ? data.items : [];
   const assistants = items.filter((m) => m && m.role === "assistant");
-  const last = assistants[assistants.length - 1];
-  if (!last) return null; // 还没产出 assistant 消息
-  const text = String(last.content || "");
-  const status = String(last.status || "").toLowerCase();
+  if (!assistants.length) return null; // 还没产出 assistant 消息
+
+  const scored = assistants.map((m) => {
+    const text = String(m.content || "");
+    return {
+      msg: m,
+      text: text,
+      hasJson:
+        /<<<AI_JSON>>>[\s\S]*?<<<END>>>/i.test(text) ||
+        /```json[\s\S]*?```/i.test(text) ||
+        hasCompleteJson(text),
+      len: text.length,
+    };
+  });
+
+  const withJson = scored.filter((x) => x.hasJson);
+  const pick = withJson.length
+    ? withJson[withJson.length - 1]
+    : scored.reduce((a, b) => (b.len > a.len ? b : a), scored[0]);
+
+  const text = pick.text;
+  const status = String(pick.msg.status || "").toLowerCase();
   return {
     text: text,
     status: status,
-    // 有 toolCallsJson 但正文还空 = Agent 正在调工具（区别于「什么都没开始」）
-    toolPending: !text && !!last.toolCallsJson,
+    // 全文都还是空、但某条带了工具调用 = Agent 正在调工具（区别于「什么都没开始」）
+    toolPending: !text && assistants.some((m) => m.toolCallsJson),
     // 完成判定：状态白名单命中，或正文已带 ```json 围栏，或正文本身就是完整 JSON
     done: !!text && (AI_DONE_STATUSES.indexOf(status) >= 0 ||
       /```json[\s\S]*?```/i.test(text) ||
@@ -1672,7 +1701,9 @@ const FUN_TITLES = [
   ["videos", "📹", "视频UP主", "个"],
   ["quoted", "🎯", "众矢之的", "次被引"],
   ["quotes_given", "🔁", "引用狂魔", "次引用"],
-  ["night", "🌙", "深夜诗人", "条"],
+  // 「熬夜之王」= 0–5 点（00:00–05:59）发消息最多，即凌晨最能熬的人。
+  // 原名「深夜诗人」与之同口径（night 是 hour < 6），此处统一为正名 —— 不再新增重复维度。
+  ["night", "🌃", "熬夜之王", "条"],
   // 「早班车劳模」= 6–8 点发言条数（口径是「话多」，不是「起得早」，称号必须说出来）
   ["early", "🚌", "早班车劳模", "条"],
   // 「早起冠军」= 早晨 6–8 点最早的发言时刻（真正的「谁先开口」）

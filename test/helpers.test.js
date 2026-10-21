@@ -119,6 +119,23 @@ ok("状态白名单算完成", aiMsg("随便写点", "done").done === true);
 ok("空正文不算完成", aiMsg("", "").done === false);
 ok("只有工具调用 -> toolPending", lib.readAiMessage({ items: [{ role: "assistant", content: "", toolCallsJson: "[]" }] }).toolPending === true);
 
+// 回归：messages 域的 items 顺序未被官方文档承诺，而 Agent 常先用一条 assistant 消息
+// 说「先取数…」并调用工具，随后才输出正文 + 结构化数据。早期实现盲取
+// assistants[length-1]，倒序时抓到的正是那句开场白 —— 面板与导出长图只剩一句话。
+const opening = { role: "assistant", content: "哼，先取数，本小姐从不凭空猜。", status: "completed", toolCallsJson: "[]" };
+const draft = { role: "assistant", content: "正文……\n<<<AI_JSON>>>\n{\"summary\":\"x\"}\n<<<END>>>", status: "completed" };
+const multi = (arr) => lib.readAiMessage({ items: arr });
+ok("倒序返回时选成稿（不取开场白）", multi([draft, opening]).text.indexOf("<<<AI_JSON>>>") >= 0);
+ok("正序返回时同样选成稿", multi([opening, draft]).text.indexOf("<<<AI_JSON>>>") >= 0);
+ok(
+  "多条都无 JSON 时取正文最长的那条",
+  multi([
+    { role: "assistant", content: "短" },
+    { role: "assistant", content: "长得多的一段正文，用来代表成稿" },
+  ]).text === "长得多的一段正文，用来代表成稿",
+);
+ok("全部为空但有工具调用 -> 仍判 toolPending", multi([{ role: "assistant", content: "", toolCallsJson: "[]" }]).toolPending === true);
+
 console.log("stripAiJson");
 const norm = (s) => String(s).replace(/\n+/g, "\n");
 eq(
