@@ -109,14 +109,24 @@ ok("isMedia(引用图片) = false", lib.isMedia("[引用: [图片]] openai好强
 ok("!isMedia(普通文本)", !lib.isMedia("普通文本"));
 
 console.log("readAiMessage");
-const aiMsg = (content, status) =>
-  lib.readAiMessage({ items: [{ role: "assistant", content: content, status: status || "" }] });
+const aiMsg = (content, status, live) =>
+  lib.readAiMessage({
+    items: [{ role: "assistant", content: content, status: status || "" }],
+    live: live || null,
+  });
 ok("没有 assistant 消息 -> null", lib.readAiMessage({ items: [] }) === null);
 ok("裸 JSON 也算完成", aiMsg('{"risks":[],"quotes":[]}').done === true);
 ok("截断的 JSON 不算完成", aiMsg('{"risks":[{"topic":"a"').done === false);
 ok("围栏 JSON 算完成", aiMsg('```json{"a":1}```').done === true);
-ok("状态白名单算完成", aiMsg("随便写点", "done").done === true);
 ok("空正文不算完成", aiMsg("", "").done === false);
+
+// 回归：单条消息 status=completed 不能当「整轮完成」
+// Agent 常先发一句「先取数…」并调工具，这条消息同样是 completed；
+// 早期用消息 status 判完成会立刻退订 + 停轮询，成稿永远读不到（实测成员分析只剩一句话）。
+ok("消息 status 完成但会话仍在流式 -> 不算完成", aiMsg("随便写点", "done", { isStreaming: true }).done === false);
+ok("会话明确已结束才收口（即使没有 JSON）", aiMsg("随便写点", "done", { isStreaming: false }).done === true);
+ok("无 live 且无 JSON -> 不判完成（交给超时兜底）", aiMsg("随便写点", "done").done === false);
+ok("带结构化数据立即完成（不必等会话结束）", aiMsg('{"risks":[]}', "completed", { isStreaming: true }).done === true);
 ok("只有工具调用 -> toolPending", lib.readAiMessage({ items: [{ role: "assistant", content: "", toolCallsJson: "[]" }] }).toolPending === true);
 
 // 回归：messages 域的 items 顺序未被官方文档承诺，而 Agent 常先用一条 assistant 消息

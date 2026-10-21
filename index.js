@@ -20,7 +20,7 @@ const useLayoutEffect = React.useLayoutEffect || React.useEffect;
 const MCP_SERVER = "wechat";
 const PAGE_LIMIT = 200;
 const ACCENT = "#3b82f6";
-// 深度分析：assistant 消息视为「已完成」的状态白名单；轮询兜底的超时上限
+// 深度分析：轮询兜底超时上限（模型不按契约输出时也要收口）
 const AI_DONE_STATUSES = ["done", "completed", "complete", "finished", "success", "succeeded", "idle", "error", "failed"];
 const AI_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 // 同步成功的提示 3 秒后淡出（与 style.css 的 .swf-syncmsg-ok 动画时长对齐）
@@ -214,15 +214,24 @@ function readAiMessage(data) {
 
   const text = pick.text;
   const status = String(pick.msg.status || "").toLowerCase();
+  // 会话级流式状态：messages 域顶层 live（同 runtime.conversation）。
+  // 订阅推送与轮询读取都应带上；缺失时只能靠「正文带结构化数据」判完成。
+  const live = (data && data.live) || null;
+  const streamingKnown = !!(live && typeof live.isStreaming === "boolean");
+  // 完成判定只认两类硬信号：
+  //   ① 正文已带完整结构化数据（AI_JSON_CONTRACT 要求成稿必须输出）
+  //   ② 会话明确已不在流式（live.isStreaming === false）—— 模型没按契约输出 JSON 时
+  //      也要收口，否则只能一直等到 10 分钟超时
+  // **不再**用单条消息的 status 判完成：Agent 常先发一句「先取数…」再调工具，
+  // 这条消息同样是 completed，提前收口会把开场白当成成稿（实测故障：成员分析只剩一句话）。
+  const done = !!text && (pick.hasJson || (streamingKnown && !live.isStreaming));
   return {
     text: text,
     status: status,
+    hasJson: pick.hasJson,
     // 全文都还是空、但某条带了工具调用 = Agent 正在调工具（区别于「什么都没开始」）
     toolPending: !text && assistants.some((m) => m.toolCallsJson),
-    // 完成判定：状态白名单命中，或正文已带 ```json 围栏，或正文本身就是完整 JSON
-    done: !!text && (AI_DONE_STATUSES.indexOf(status) >= 0 ||
-      /```json[\s\S]*?```/i.test(text) ||
-      hasCompleteJson(text)),
+    done: done,
   };
 }
 
@@ -3321,6 +3330,14 @@ function WechatPanel({ api, locale }) {
   // 没有它时「A 群慢响应 + 切到 B 群」会把 A 的消息盖到 B 的列表上（新群标题 + 旧群消息）。
   const feedGenRef = useRef(0);
   const [debug, setDebug] = useState("");
+  // 操作反馈（如「引用原文不在已加载范围」）：自动淡出，避免一条提示永久占住面板。
+  // 技术 dump（MCP 异常等）仍常驻，用户可手动关闭。
+  const debugTimerRef = useRef(null);
+  const showTransientDebug = useCallback((text, ms) => {
+    setDebug(text);
+    if (debugTimerRef.current) clearTimeout(debugTimerRef.current);
+    debugTimerRef.current = setTimeout(() => setDebug(""), ms || 6000);
+  }, []);
 
   const [stats, setStats] = useState(null);
   // 轻量概览（get_session_overview）：切群后立刻出卡，不必等重量级 digest 聚合
@@ -4178,6 +4195,11 @@ function WechatPanel({ api, locale }) {
     if (aiTargetRef.current === "member") setMemberAiStatus(status);
     else setAiStatus(status);
   }, []);
+  // 收口提示：成员分析挂 memberAiMsg，群分析挂 saveMsg（两处各有自己的渲染位）
+  const setTargetAiNote = useCallback((text) => {
+    if (aiTargetRef.current === "member") setMemberAiMsg(text);
+    else setSaveMsg(text);
+  }, []);
 
   const applyAiPayload = useCallback(
     (data) => {
@@ -4189,10 +4211,16 @@ function WechatPanel({ api, locale }) {
       }
       setTargetAi(msg.text);
       setTargetAiData(parseAiData(msg.text));
-      if (msg.done) setTargetAiStatus("done");
+      if (msg.done) {
+        setTargetAiStatus("done");
+        // 会话已结束却没拿到结构化数据：明确告知，避免把半截正文静默当成分析结果
+        if (!msg.hasJson) {
+          setTargetAiNote("已结束，但未解析到结构化数据块：图表可能为空，可点「打开会话」查看完整正文。");
+        }
+      }
       return msg.done;
     },
-    [parseAiData, setTargetAi, setTargetAiData, setTargetAiStatus],
+    [parseAiData, setTargetAi, setTargetAiData, setTargetAiStatus, setTargetAiNote],
   );
 
   const startPoll = useCallback(
@@ -4204,7 +4232,7 @@ function WechatPanel({ api, locale }) {
         // 超时保护：极端情况下（模型没按约定输出 json）也要收敛，不能无限轮询
         if (Date.now() - aiPollStartRef.current > AI_POLL_TIMEOUT_MS) {
           setTargetAiStatus("done");
-          setSaveMsg("已停止等待：超过 10 分钟未解析到完整结果，可点「打开会话」查看原文。");
+          setTargetAiNote("已停止等待：超过 10 分钟未解析到完整结果，可点「打开会话」查看原文。");
           stopPoll();
           return;
         }
@@ -4216,7 +4244,7 @@ function WechatPanel({ api, locale }) {
           const denied = resp && resp.denied && resp.denied.messages;
           if (denied) {
             setTargetAiStatus("done");
-            setSaveMsg(
+            setTargetAiNote(
               "读取会话消息被拒（" + (denied.reason || "privacy-declaration-missing") +
                 "）：需要在 plugin.json 的 privacy.scopes 里声明 \"messages\"，然后重装或重扫插件。",
             );
@@ -4230,7 +4258,7 @@ function WechatPanel({ api, locale }) {
         }
       }, 2000);
     },
-    [api, applyAiPayload, stopPoll, setTargetAiStatus],
+    [api, applyAiPayload, stopPoll, setTargetAiStatus, setTargetAiNote],
   );
 
   const subscribeAi = useCallback(
@@ -5717,7 +5745,7 @@ function WechatPanel({ api, locale }) {
                 onClick: () => {
                   const pq = parseQuote(q.quote);
                   if (!jumpToQuote(pq.author, pq.text, m.time)) {
-                    setDebug("原消息不在当前已加载范围内：可点「加载更早」扩大范围，或用关键词搜索定位。");
+                    showTransientDebug("原消息不在当前已加载范围内：可点「加载更早」扩大范围，或用关键词搜索定位。");
                   }
                 },
               },
@@ -7406,7 +7434,18 @@ function WechatPanel({ api, locale }) {
         : null,
       // 提示条贴在工具栏下、滚动容器**外**：.swf-body 是滚动容器且首屏会贴底，
       // 放在里面会被滚出视口 —— 而这条提示正是「点了没反应」时要被看到的那句话。
-      debug ? h("code", { className: "swf-code" }, debug) : null,
+      debug
+        ? h(
+            "div",
+            { className: "swf-hint" },
+            h("code", { className: "swf-code swf-hint-body" }, debug),
+            h(
+              "button",
+              { className: "swf-hint-x", onClick: () => setDebug(""), title: "关闭提示" },
+              "✕",
+            ),
+          )
+        : null,
     ),
     h(
       "div",

@@ -910,6 +910,34 @@
   word-break: break-all;
 }
 
+/* 提示条 + 关闭按钮：.swf-code 单独使用时保持原样（技术 dump 常驻），
+   包一层 .swf-hint 时右侧带一个可点的 ✕（操作反馈类提示可手动收掉） */
+.swf-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.swf-hint-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.swf-hint-x {
+  flex: 0 0 auto;
+  margin-top: 6px;
+  padding: 2px 5px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--swf-dim);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.swf-hint-x:hover {
+  background: var(--swf-active);
+  color: var(--swf-text);
+}
+
 /* ---------- 依赖引导 ---------- */
 .swf-guide {
   padding: 16px;
