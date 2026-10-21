@@ -1723,6 +1723,17 @@ const FUN_TITLES = [
   // 「早起冠军」= 早晨 6–8 点最早的发言时刻（真正的「谁先开口」）
   ["early_first", "🌅", "早起冠军", ""],
   ["recall_like_events", "🫥", "撤回大师", "次"],
+  // ---- 玩梗组（v0.32.17 新增，全部来自 MCP 的成员级聚合）----
+  ["longest", "📜", "长文作家", "字"],
+  ["midnight", "🌚", "午夜凶铃", "条"],
+  ["weekend", "🎉", "周末战神", "条"],
+  ["puncts", "❗", "标点狂魔", "个"],
+  ["mentions", "📮", "@狂魔", "次"],
+  ["topic_enders", "🔇", "话题终结者", "次"],
+  ["repeats", "🦜", "复读机", "次"],
+  ["first_of_day", "🪑", "抢沙发", "次"],
+  // 潜水王：按 last_time 升序（最早收手的人），value 是时间戳，靠 label 显示 HH:MM
+  ["last_time", "🐢", "潜水王", ""],
 ];
 
 /** 各维度的封号门槛：低于此值不颁发 —— 稀疏维度硬凑称号只会闹笑话。
@@ -1741,6 +1752,16 @@ const FUN_TITLE_MIN = {
   early: 5,
   early_first: 1,
   recall_like_events: 2,
+  // 玩梗组门槛：稀疏维度硬凑称号只会闹笑话（1 次话题终结 / 1 个标点不该封王）
+  longest: 200,
+  midnight: 10,
+  weekend: 10,
+  puncts: 5,
+  mentions: 3,
+  topic_enders: 2,
+  repeats: 3,
+  first_of_day: 1,
+  // last_time 刻意不设门槛：它的 value 是时间戳，用数值比大小毫无意义
 };
 
 /** 从 member_leaders 取各维度冠军，拼成「统计称号」列表。
@@ -1765,8 +1786,17 @@ function funTitles(stats) {
       unit: row[3],
       who: top.display_name || top.username || "?",
       value: value,
-      // 早起冠军用 HH:MM（MCP 已转好），其余维度用计数
+      // label：MCP 对时间类维度（early_first / last_time）已转好 HH:MM
       label: String(top.label || ""),
+      // display：统一的可直接渲染文本（三种口径收敛在一处，渲染端不再判断）
+      display:
+        key === "last_time"
+          ? top.label
+            ? "最后发言 " + String(top.label)
+            : "—"
+          : top.label
+            ? String(top.label)
+            : fmtNum(value) + (row[3] ? " " + row[3] : ""),
     });
   });
   return out;
@@ -2290,6 +2320,22 @@ function buildReportHtml(opts) {
     .map((m) => ({ name: m.name || m.u || "?", count: Number(m.messages) || 0, u: m.u }));
   const typeRows = mergeTypeRows(stats.type_distribution || []).slice(0, 10).map(([name, count]) => ({ name: name, count: count }));
   const quotedRows = (((stats.quote_network || {}).top_quoted) || []).slice(0, 8).map((x) => ({ name: x.name, count: Number(x.count) || 0 }));
+  // 群热词：与面板同一份 MCP 数据（[{phrase, count}]），长图里最多铺 24 个胶囊
+  const phraseRows = ((stats.top_phrases || []) || []).slice(0, 24);
+  const phraseHtml = phraseRows.length
+    ? '<div class="words">' +
+      phraseRows
+        .map(
+          (p) =>
+            '<span class="word">' +
+            escHtml(String(p.phrase || "")) +
+            " ×" +
+            escHtml(String(Number(p.count) || 0)) +
+            "</span>",
+        )
+        .join("") +
+      "</div>"
+    : "";
 
   const trendBars = points
     .map(
@@ -2503,6 +2549,7 @@ function buildReportHtml(opts) {
     (memberRows.length ? '<div class="sec">成员榜<small>Top 10 · 发言条数</small></div>' + rowsHtml(memberRows, ACCENT, true, true) : "") +
     (quotedRows.length ? '<div class="sec">被引用榜</div>' + rowsHtml(quotedRows, ACCENT, false, false) : "") +
     (typeRows.length ? '<div class="sec">消息类型</div>' + rowsHtml(typeRows, ACCENT, false, false) : "") +
+    (phraseHtml ? '<div class="sec">群热词<small>按出现次数</small></div>' + phraseHtml : "") +
     aiBlocks.join("") +
     "</div>" +
     "<footer>由 Snow App「微信群聊」面板生成 · " + escHtml(o.generatedAt || "") + " · 数据来自本机 wechat MCP（只读）</footer>" +
@@ -3088,6 +3135,7 @@ function makeT(locale) {
     hourly: en ? "Hourly distribution" : "按小时分布",
     topSenders: en ? "Top senders" : "活跃发言者",
     types: en ? "Message types" : "消息类型",
+    phrases: en ? "Hot phrases" : "群热词",
     ai: en ? "Deep analysis" : "深度分析",
     open: en ? "Open session" : "打开会话",
     prompt: en ? "Prompt preview" : "提示词预览",
@@ -5021,6 +5069,19 @@ function WechatPanel({ api, locale }) {
       types.slice(0, 8).forEach(([label, count]) => lines.push("- " + label + "：" + fmtNum(count)));
     }
 
+    // 群热词：MCP 已做 n-gram 去碎片与虚词过滤，这里只负责排版（一行短语榜，省版面）
+    const phrases = d.top_phrases || [];
+    if (reportSections.types && phrases.length) {
+      lines.push("");
+      lines.push("## 群热词");
+      lines.push(
+        phrases
+          .slice(0, 20)
+          .map((p) => String(p.phrase || "") + " ×" + fmtNum(p.count))
+          .join("、"),
+      );
+    }
+
     const highlights = d.highlights || [];
     if (reportSections.quotes && highlights.length) {
       lines.push("");
@@ -5724,6 +5785,8 @@ function WechatPanel({ api, locale }) {
       (statsScope !== sessionId || statsRange.start !== rangeStart || statsRange.end !== rangeEnd)
     );
     const typeRows = (stats && Array.isArray(stats.type_distribution)) ? stats.type_distribution : null;
+    // 群热词：MCP 已按 n-gram 去碎片 + 虚词过滤给出 Top 30（[{phrase, count}]）
+    const phraseRows = (stats && Array.isArray(stats.top_phrases)) ? stats.top_phrases : [];
 
     // 趋势粒度由报告类型决定（日=小时，周/月=天，年=月），见上方 trend
     const peakPoint = trend.points.reduce((a, p) => (p.value > a.value ? p : a), { value: 0, key: "" });
@@ -5980,6 +6043,32 @@ function WechatPanel({ api, locale }) {
           )
         : null,
 
+      // 群热词：MCP 的 n-gram 结果，只展示短语与次数 —— 语义判断（是产品名还是口头禅）留给 AI 与读者
+      phraseRows.length
+        ? h(
+            "div",
+            null,
+            h(
+              "div",
+              { className: "swf-section" },
+              h("span", { className: "swf-ico" }, "💬"),
+              t.phrases + " · Top " + phraseRows.length,
+            ),
+            h(
+              "div",
+              { className: "swf-words" },
+              phraseRows.map((p, i) =>
+                h(
+                  "span",
+                  { className: "swf-word", key: "phrase-" + i, title: "出现 " + (Number(p.count) || 0) + " 次" },
+                  String(p.phrase || ""),
+                  h("b", null, " ×" + (Number(p.count) || 0)),
+                ),
+              ),
+            ),
+          )
+        : null,
+
       // 当天范围下热力图与上方「24 小时分布」是同一份数据（只有一行），不再重复画
       heat.hasData && trend.kind !== "hour"
         ? h(
@@ -6032,12 +6121,12 @@ function WechatPanel({ api, locale }) {
                 {
                   className: "swf-fun-card",
                   key: "fun-" + x.key,
-                  title: x.title + "：" + x.who + " " + (x.label || x.value + " " + x.unit),
+                  title: x.title + "：" + x.who + " " + x.display,
                 },
                 h("div", { className: "swf-fun-ico" }, x.icon),
                 h("div", { className: "swf-fun-title" }, x.title),
                 h("div", { className: "swf-fun-who" }, x.who),
-                h("div", { className: "swf-fun-val" }, x.label || fmtNum(x.value) + " " + x.unit),
+                h("div", { className: "swf-fun-val" }, x.display),
               ),
             ),
           ),
