@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -169,6 +169,25 @@ eq("fmtNum 257827", lib.fmtNum(257827), "257.8k");
 eq("fmtNum 2955", lib.fmtNum(2955), "2955");
 eq("dayKeyOf", lib.dayKeyOf("2026-10-18 00:01:08"), "2026-10-18");
 eq("hhmmOf", lib.hhmmOf("2026-10-18 00:01:08"), "00:01");
+
+console.log("buildStatsBrief（统计基线注入）");
+// 回归：v0.32.13 在 renderDigest 里漏了 stats 判空，导致「Cannot read properties of null」白屏。
+// 统计基线构造函数本身也必须能承受 stats 为 null / 字段缺失。
+const briefNull = lib.buildStatsBrief(null, null, "x@chatroom", "2026-10-21 00:00:00", "2026-10-21 23:59:59");
+ok("stats 为 null 不崩（有兜底文案）", briefNull.indexOf("未加载统计基线") >= 0);
+const briefEmpty = lib.buildStatsBrief({}, null, "x@chatroom", "2026-10-21 00:00:00", "2026-10-21 23:59:59");
+ok("stats 为空对象不崩", typeof briefEmpty === "string" && briefEmpty.length > 0);
+// 回归：字段名必须与 MCP 的 _system_events 对齐（此前读 withdrawn / system，两个都不存在，
+// 注入给 Agent 的基线永远是「0 / 0」）。
+const briefSys = lib.buildStatsBrief(
+  { total_messages: 2227, unique_senders: 99, system_events: { recall_like_count: 19, system_message_count: 19 } },
+  { display_name: "测试群" },
+  "x@chatroom",
+  "2026-10-21 00:00:00",
+  "2026-10-21 23:59:59",
+);
+ok("撤回/系统消息读真实字段名", briefSys.indexOf("19 / 19") >= 0);
+ok("不再输出假的 0 / 0", briefSys.indexOf("0 / 0") < 0);
 
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);

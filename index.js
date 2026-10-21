@@ -250,7 +250,14 @@ function buildStatsBrief(stats, current, sessionId, rangeStart, rangeEnd) {
   }
   const sys = stats.system_events;
   if (sys && typeof sys === "object") {
-    lines.push("撤回类 / 系统消息：" + (Number(sys.withdrawn) || 0) + " / " + (Number(sys.system) || 0));
+    // 字段名必须与 MCP 的 _system_events 对齐（recall_like_count / system_message_count）——
+    // 此前读的是 withdrawn / system，两个都不存在，注入给 Agent 的基线永远是「0 / 0」。
+    lines.push(
+      "撤回类 / 系统消息：" +
+        (Number(sys.recall_like_count) || 0) +
+        " / " +
+        (Number(sys.system_message_count) || 0),
+    );
   }
   return lines.join("\n");
 }
@@ -5676,10 +5683,11 @@ function WechatPanel({ api, locale }) {
         ? String(peakPoint.key).slice(11)
         : peakPoint.key;
 
-    // 人均：分子扣掉群自身消息，与分母 uniqueSenders（不含群自身）保持同口径
-    const groupSelfMsgs = Number((stats.system_events && stats.system_events.group_self_messages) || 0);
+    // 人均：分子扣掉群自身消息，与分母 uniqueSenders（不含群自身）保持同口径。
+    // ⚠️ renderDigest 的 stats 可能为 null（未生成统计），必须逐层判空 —— 与上方几行保持一致。
+    const groupSelfMsgs = Number((stats && stats.system_events && stats.system_events.group_self_messages) || 0);
     const perCapita = uniqueSenders
-      ? Math.round(Math.max(0, (Number(stats.total_messages) || 0) - groupSelfMsgs) / uniqueSenders)
+      ? Math.round(Math.max(0, (Number(stats && stats.total_messages) || 0) - groupSelfMsgs) / uniqueSenders)
       : 0;
 
     // 类型分布：MCP 全量 type_distribution（[{local_type,label,count}]）→ 按 label 合并
