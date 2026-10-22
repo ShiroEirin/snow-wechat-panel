@@ -1711,6 +1711,11 @@
   background: var(--swf-bubble);
   line-height: 1.75;
 }
+/* 逆天瞬间：与「名场面」同为引用卡，用琥珀色左边框区分 —— 这是「离谱」而不是「值得记住」 */
+.swf-wild-card {
+  border-left-color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 7%, var(--swf-bubble));
+}
 /* 争议指数星级 */
 .swf-risk {
   letter-spacing: 0.2px;

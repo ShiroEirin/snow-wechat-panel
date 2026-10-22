@@ -4604,7 +4604,7 @@ function WechatPanel({ api, locale }) {
         DEEP_WINDOW_NOTE,
         "",
         "取数建议（wechat MCP）：",
-        "- get_member_profile(member=\"" + uname + "\", session_id" + (allTime ? "" : ", start, end") + ", top_n=10, include_samples=30)：画像 + 该成员最近 30 条原文，一次取齐",
+        "- get_member_profile(member=\"" + uname + "\", session_id" + (allTime ? "" : ", start, end") + ", top_n=10, include_samples=80)：画像 + 该成员最近 80 条原文，一次取齐（够覆盖当日大部分发言；找「逆天瞬间」必须看原文）",
         "- get_messages_by_range(session_id" + (allTime ? "" : ", start, end") + ", sender=\"" + uname + "\", limit=200, offset, order=\"desc\")：需要更多原文时按该成员翻页（服务端已按发言人过滤，不用自己筛）",
         "",
         "输出分两部分。",
@@ -4620,9 +4620,15 @@ function WechatPanel({ api, locale }) {
         "结构：",
         "1. **一句话定性** —— TA 在这个群里是谁（带梗，但要准）",
         "2. **名场面** —— 1-3 个最有代表性的瞬间，每条逐字摘原文（不要改写）",
-        "3. **语言指纹** —— 口头禅 / 语气 / 标点与长度习惯（结合 tone_words / top_phrases / samples）",
-        "4. **社交位置** —— 常和谁互动、在什么话题里冒头、扮演什么角色",
-        "5. **一句忠告** —— 给 TA 或群主的（可以损，但要有用）",
+        "3. **逆天瞬间** —— 从原文里挑 1-3 条 TA 最离谱的发言：逐字引用 + 半句吐槽",
+        "   - 「逆天」的判定标准：颠覆常识的脑洞 / 逻辑跳脱 / 强烈反差 / 一本正经地胡说八道 / 突然暴论 / 神逻辑",
+        "   - 优先级（从高到低）：暴论与争议 > 离谱类比 > 逻辑跳脱 > 趣味调侃",
+        "   - **剔除**：单纯玩梗、网络热词堆砌、无内容的刷屏、复读别人",
+        "   - 如果 TA 这段时间确实很正常，就写「今天很稳，没有逆天发言」，**不要硬凑**",
+        "   - 每条格式：先 `> 原文逐字` 引用，下一行写「—— 为什么离谱（一句话，可以损） 」",
+        "4. **语言指纹** —— 口头禅 / 语气 / 标点与长度习惯（结合 tone_words / top_phrases / samples）",
+        "5. **社交位置** —— 常和谁互动、在什么话题里冒头、扮演什么角色",
+        "6. **一句忠告** —— 给 TA 或群主的（可以损，但要有用）",
         "",
         ...AI_FORMAT_RULES,
         "",
@@ -4640,6 +4646,7 @@ function WechatPanel({ api, locale }) {
         '  "style": {"tone": "语气特征", "habits": ["口头禅或习惯"]},',
         '  "interactions": [{"with": "互动对象", "pattern": "互动模式"}],',
         '  "quotes": [{"text": "原话（逐字）", "why": "为什么值得记住"}],',
+        '  "wild": [{"text": "原文逐字", "why": "为什么离谱（一句话）"}],',
         '  "advice": ["给管理员或本人的建议"]',
         "}",
         "",
@@ -4647,6 +4654,8 @@ function WechatPanel({ api, locale }) {
           (aiSettings.dims && aiSettings.dims.titles
             ? "tags 2-4 个且每个都要能在正文或发言里找到依据；mbti 没把握就留空（宁可留空也不要硬套）；"
             : "") +
+          "wild 0-3 条，text 必须能在给出的原文里逐字找到（找不到就不要写），why 用一句话说清离谱在哪；" +
+          "没有逆天发言就给空数组，不要为了凑数硬编；" +
           "没有把握的字段给空数组 / 空字符串，不要编造。",
         AI_JSON_CONTRACT,
         ...(String(aiSettings.extra || "").trim()
@@ -6703,6 +6712,21 @@ function WechatPanel({ api, locale }) {
                       "div",
                       { className: "swf-quote-card", key: "mquote-" + i },
                       x.time ? h("b", null, String(x.time) + " ") : null,
+                      String(x.text || ""),
+                      x.why ? h("span", { className: "swf-note" }, "（" + String(x.why) + "）") : null,
+                    ),
+                  ),
+                )
+              : null,
+            memberAiData && Array.isArray(memberAiData.wild) && memberAiData.wild.length
+              ? h(
+                  "div",
+                  null,
+                  h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🌪"), "逆天瞬间"),
+                  memberAiData.wild.map((x, i) =>
+                    h(
+                      "div",
+                      { className: "swf-quote-card swf-wild-card", key: "mwild-" + i },
                       String(x.text || ""),
                       x.why ? h("span", { className: "swf-note" }, "（" + String(x.why) + "）") : null,
                     ),
