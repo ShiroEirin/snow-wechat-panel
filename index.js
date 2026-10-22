@@ -405,6 +405,27 @@ function aiChartNodes(data) {
             ),
           )
         : null,
+      aiData && Array.isArray(aiData.quality) && aiData.quality.length
+        ? h(
+            "div",
+            null,
+            h(
+              "div",
+              { className: "swf-sub", title: "由 AI 归纳的聊天性质构成：维度名抽象、点评具体" },
+              h("span", { className: "swf-ico" }, "🧪"),
+              "群聊质量锐评",
+            ),
+            aiData.quality.map((x, i) =>
+              h(
+                "div",
+                { className: "swf-quality", key: "q-" + i },
+                h("span", { className: "swf-quality-name" }, String(x.name || "")),
+                h("span", { className: "swf-quality-pct" }, (Number(x.percentage) || 0) + "%"),
+                h("span", { className: "swf-quality-comment" }, String(x.comment || "")),
+              ),
+            ),
+          )
+        : null,
       aiData && Array.isArray(aiData.todos) && aiData.todos.length
         ? h(
             "div",
@@ -641,6 +662,9 @@ function aiJsonFields(dims, limits) {
   // 字段名用 key_points 而不是 highlights —— MCP 的 stats.highlights 是「金句候选」，同名会混淆
   fields.push('  "key_points": ["要点（3-5 条，每条一句话，可核验的事实或结论）"]');
   if (d.topics) fields.push('  "topics": [{"name": "话题名", "weight": 0, "keywords": ["关键词"]}]');
+  // 群聊质量锐评：与 topics 是不同维度 —— topics 是「聊了什么」，quality 是「聊天本身是什么性质」
+  //（技术讨论 / 玩梗 / 求助 / 情绪宣泄…），维度名必须抽象，点评可以很具体
+  if (d.topics) fields.push('  "quality": [{"name": "2-6 字的抽象维度名", "percentage": 0, "comment": "一句犀利或幽默的点评"}]');
   if (d.todos) fields.push('  "todos": [{"who": "谁", "what": "要做什么"}]');
   if (d.risks) fields.push('  "risks": ["风险或争议点"]');
   if (d.sentiment) fields.push('  "sentiment": [{"period": "2026-10-01", "score": 0}]');
@@ -663,6 +687,12 @@ function aiJsonConstraints(dims, limits) {
   out.push("- key_points 3-5 条，每条一句话（40 字以内），必须是能从上文或统计里核验的事实 / 结论，不要写感想。");
   out.push("- key_points 不要复述 summary 已经说过的核心事件，也不要把统计数字当要点（总量 / 人数 / 峰值小时 / 榜单名次这些图表里已有）；要点要往「发生了什么、影响是什么」上写。");
   if (d.topics) out.push("- topics 3-" + (lim.topics || 8) + " 个（weight 取 0-100 的相对重要度）。");
+  if (d.topics) out.push(
+    "- quality 3-6 个：描述「这段时间的聊天由什么构成」，不是话题列表。" +
+      "维度名必须是 2-6 字的**抽象类别**（如「硬核技术」「情绪树洞」「无意义水群」「资源搬运」「围观吃瓜」），" +
+      "**严禁**出现具体人名、项目名、报错原文或细碎事件；percentage 总和 ≤ 100；" +
+      "comment 一句犀利或幽默的点评，可以非常具体、可以玩梗，把该维度下的名场面融进去。",
+  );
   if (d.sentiment) out.push("- sentiment 按天或按周给分（-100 到 100，负=负面，正=正面），最多 14 个点。");
   if (d.controversies) out.push("- controversies level 取 0-5。");
   if (d.titles) out.push("- titles 1-" + (lim.titles || 5) + " 个（可以是趣味称号，但必须给依据）。");
@@ -2443,6 +2473,23 @@ function buildReportHtml(opts) {
         (kws.length ? '<div class="words">' + kws.map((k) => '<span class="word">' + escHtml(k) + "</span>").join("") + "</div>" : ""),
     );
   }
+  if (list(ai.quality).length) {
+    aiBlocks.push(
+      '<div class="sec">群聊质量锐评<small>维度名抽象、点评具体</small></div>' +
+        list(ai.quality)
+          .map(
+            (x) =>
+              '<div class="item"><b>' +
+              escHtml(x.name) +
+              '</b> <span class="muted">' +
+              (Number(x.percentage) || 0) +
+              "%</span> — " +
+              escHtml(x.comment) +
+              "</div>",
+          )
+          .join(""),
+    );
+  }
   if (list(ai.todos).length) {
     aiBlocks.push(
       '<div class="sec">待办</div>' +
@@ -2651,6 +2698,7 @@ function buildMemberHtml(opts) {
   const aiHtml = aiText ? '<div class="sec">AI 角色分析</div><div class="md">' + mdToHtml(aiText) + "</div>" : "";
   // Hero 导语优先用 AI 的结构化「人物素描」，没有就从正文里截一段（不编造）
   const persona = o.aiData && o.aiData.persona ? String(o.aiData.persona) : "";
+  const memberTitle = o.aiData && o.aiData.title ? String(o.aiData.title) : "";
   const lead = persona || (aiText ? aiText.replace(/[#>*`\-]/g, "").replace(/\s+/g, " ").trim().slice(0, 120) : "");
 
   return (
@@ -2662,6 +2710,7 @@ function buildMemberHtml(opts) {
     '<div class="hero-tag">成员画像</div>' +
     "<h1>" + faceHtml + escHtml(name) + "</h1>" +
     '<div class="hero-range">' + escHtml(o.groupName || "") + (o.rangeLabel ? " · " + escHtml(o.rangeLabel) : "") + "</div>" +
+    (memberTitle ? '<div class="hero-title">' + escHtml(memberTitle) + "</div>" : "") +
     (lead ? '<div class="hero-lead">' + escHtml(lead) + "</div>" : "") +
     '<section class="kpis">' +
     '<div class="kpi"><div class="k">💬 消息</div><div class="v">' + escHtml(fmtNum(total)) + "</div></div>" +
@@ -4664,9 +4713,22 @@ function WechatPanel({ api, locale }) {
         "- 抽象要有度：可以夸张、可以损，但不人身攻击、不编造没发生的事；看不出来就写「看不出来」，不要硬凑。",
         "- 允许口语与网络用语（这哥们 / 绷不住 / 硬控 / 属于是），但不为了搞笑牺牲信息量。",
         "- 所有判断都要落到该成员的实际发言上，不要拿「大家普遍觉得」这种无源结论充数。",
+        "- **分工铁律**：称号必须抽象（2-6 字），解释必须具体（带原话、带细节）。不要反过来 —— 称号写成一长句、解释全靠形容词，那是最难看的写法。",
+        "",
+        "## 称号参考（可以自行拓展，但必须比这些更贴）",
+        "- 许愿池：整天 @ 官方求更新、求内测的人",
+        "- 算账派：什么都要换算成 token 成本 / 性价比的人",
+        "- 复读机：专挑别人的话反着说、或原样复读的人",
+        "- 夜班保安：凌晨还在群里巡逻的人",
+        "- 情报局长：搬运行业新闻、链接、截图的人",
+        "- 情绪树洞：专接别人倒苦水的人",
+        "- 梗百科：什么梗都能接住、还能续写的人",
+        "- 潜水艇：平时不说话，一开口就是长文的人",
+        "- 技术布道者：反复用具体案例论证某个工具的人",
+        "- 阴阳师：说话永远留半句、让你自己体会的人",
         "",
         "结构：",
-        "1. **一句话定性** —— TA 在这个群里是谁（带梗，但要准）",
+        "1. **称号 + 一句话解释** —— 先给 2-6 字称号（例：算账型许愿池 / 反问句狙击手），再用一句话说清 TA 在这个群里是谁（带梗，但要准）",
         "2. **名场面** —— 1-3 个最有代表性的瞬间，每条逐字摘原文（不要改写）；时间写 samples 里的 HH:MM，不要自己推断时段",
         "3. **逆天瞬间** —— 从原文里挑 1-3 条 TA 最离谱的发言：逐字引用 + 半句吐槽",
         "   - 「逆天」的判定标准：颠覆常识的脑洞 / 逻辑跳脱 / 强烈反差 / 一本正经地胡说八道 / 突然暴论 / 神逻辑",
@@ -4683,6 +4745,7 @@ function WechatPanel({ api, locale }) {
         "",
         "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：",
         "{",
+        '  "title": "2-6 字称号（如「算账型许愿池」，与正文第 1 条一致）",',
         '  "persona": "一句话人物素描（与正文第 1 条同源，可带梗）",',
         // 人设标签属于「称号」维度：开关关闭时不要求输出（与群分析 titles 同一口径，避免开关与产出打架）
         ...(aiSettings.dims && aiSettings.dims.titles
@@ -5197,6 +5260,13 @@ function WechatPanel({ api, locale }) {
         lines.push("## 争议指数");
         list(aiData.controversies).forEach((x) =>
           lines.push("- " + String(x.topic || "") + "（" + (Number(x.level) || 0) + "/5）" + (x.reason ? " — " + x.reason : "")),
+        );
+      }
+      if (list(aiData.quality).length) {
+        lines.push("");
+        lines.push("## 群聊质量锐评");
+        list(aiData.quality).forEach((x) =>
+          lines.push("- **" + String(x.name || "") + "** " + (Number(x.percentage) || 0) + "% — " + String(x.comment || "")),
         );
       }
       if (list(aiData.titles).length) {
@@ -6473,6 +6543,7 @@ function WechatPanel({ api, locale }) {
               const uname = mm.username || "";
               const nm = mm.display_name || uname;
               const av = (uname && avatars[uname]) || "";
+              const mTitle = memberAiData && memberAiData.title ? String(memberAiData.title) : "";
               const persona = memberAiData && memberAiData.persona ? String(memberAiData.persona) : "";
               const tags = memberAiData && Array.isArray(memberAiData.tags) ? memberAiData.tags : [];
               const mbti = memberAiData && memberAiData.mbti ? String(memberAiData.mbti) : "";
@@ -6491,7 +6562,12 @@ function WechatPanel({ api, locale }) {
                 h(
                   "div",
                   { className: "swf-member-hero-main" },
-                  h("div", { className: "swf-member-hero-name" }, nm),
+                  h(
+                    "div",
+                    { className: "swf-member-hero-name" },
+                    nm,
+                    mTitle ? h("span", { className: "swf-member-hero-title" }, mTitle) : null,
+                  ),
                   h("div", { className: "swf-member-hero-persona" }, persona || fallback),
                   persona && !tags.length && !mbti
                     ? h("div", { className: "swf-note", style: { marginTop: "3px" } }, fallback)

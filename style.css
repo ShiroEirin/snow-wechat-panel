@@ -1716,6 +1716,63 @@
   border-left-color: #f59e0b;
   background: color-mix(in srgb, #f59e0b 7%, var(--swf-bubble));
 }
+
+/* 群聊质量锐评：维度名（2-6 字）+ 占比 + 一句点评 */
+.swf-quality {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 5px 0;
+  padding: 6px 4px;
+  border-bottom: 1px dashed color-mix(in srgb, currentColor 12%, transparent);
+  line-height: 1.6;
+}
+.swf-quality:last-child {
+  border-bottom: none;
+}
+.swf-quality-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--swf-text);
+}
+.swf-quality-pct {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--swf-green);
+}
+.swf-quality-comment {
+  flex: 1 1 100%;
+  font-size: 12.5px;
+  color: var(--swf-dim);
+}
+
+/* 成员 hero 的称号徽标：与名字同排，2-6 字 */
+.swf-member-hero-title {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: middle;
+  color: #fff;
+  background: color-mix(in srgb, #f59e0b 82%, #000);
+}
+
+/* 成员长图 hero 的称号徽标 */
+.hero-title {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
 /* 争议指数星级 */
 .swf-risk {
   letter-spacing: 0.2px;
