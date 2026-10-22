@@ -2109,6 +2109,39 @@ function mdNodes(parts, keyBase) {
   });
 }
 
+/* 段落开头的状态标记 → 自动渲染成彩色状态条。
+   模型只写 emoji，不写任何样式；渲染层负责识别与配色。
+   用 Array.from 取第一个字符，避免 emoji 代理对被切成两半。 */
+// key 一律用「基础码点」，不带 VS16 —— ⚠️ 是 U+26A0 + U+FE0F 两个码点，
+// 按码点取首字符只会拿到 ⚠，匹配不上带变体选择符的 key（实测踩过）。
+const MD_STATUS_KINDS = {
+  "✅": "ok",
+  "✔": "ok",
+  "☑": "ok",
+  "⚠": "warn",
+  "🚨": "danger",
+  "❌": "danger",
+  "⛔": "danger",
+  "💡": "tip",
+  "ℹ": "info",
+  "📌": "note",
+  "🔥": "hot",
+};
+// 允许每个状态符号后面跟一个可选的 VS16（U+FE0F）
+const MD_STATUS_RE = /^(✅|✔|☑|⚠|🚨|❌|⛔|💡|ℹ|📌|🔥)\uFE0F?\s*/u;
+
+function mdStatusOf(text) {
+  const m = MD_STATUS_RE.exec(String(text || "").trim());
+  if (!m) return null;
+  const kind = MD_STATUS_KINDS[m[1]];
+  return kind ? { icon: m[1], kind: kind } : null;
+}
+
+function mdStatusRest(text) {
+  // 用同一个正则替换开头（含可选 VS16 与空白），比按 length 切片稳
+  return String(text || "").trim().replace(MD_STATUS_RE, "").trim();
+}
+
 function mdBlockNode(b, i) {
   const key = "md-" + i;
   if (b.t === "hr") return h("hr", { key: key, className: "swf-md-hr" });
@@ -2142,29 +2175,44 @@ function mdBlockNode(b, i) {
     );
   }
   if (b.t === "table") {
+    // 窄面板里表格会被挤扁：外层给横向滚动容器，表头吸顶、首列吸附在左侧
     return h(
-      "table",
-      { key: key, className: "swf-md-table" },
+      "div",
+      { key: key, className: "swf-md-table-wrap" },
       h(
-        "thead",
-        null,
+        "table",
+        { className: "swf-md-table" },
         h(
-          "tr",
+          "thead",
           null,
-          b.head.map((c, j) => h("th", { key: key + "-h" + j }, mdNodes(mdInline(c), key + "-h" + j))),
-        ),
-      ),
-      h(
-        "tbody",
-        null,
-        b.rows.map((r, j) =>
           h(
             "tr",
-            { key: key + "-r" + j },
-            r.map((c, k) => h("td", { key: key + "-r" + j + "-" + k }, mdNodes(mdInline(c), key + "-r" + j + "-" + k))),
+            null,
+            b.head.map((c, j) => h("th", { key: key + "-h" + j }, mdNodes(mdInline(c), key + "-h" + j))),
+          ),
+        ),
+        h(
+          "tbody",
+          null,
+          b.rows.map((r, j) =>
+            h(
+              "tr",
+              { key: key + "-r" + j },
+              r.map((c, k) => h("td", { key: key + "-r" + j + "-" + k }, mdNodes(mdInline(c), key + "-r" + j + "-" + k))),
+            ),
           ),
         ),
       ),
+    );
+  }
+  // 段落开头的状态标记（✅ / ⚠️ / 🚨 / 💡…）自动转成彩色状态条
+  const st = mdStatusOf(b.v);
+  if (st) {
+    return h(
+      "div",
+      { key: key, className: "swf-md-status swf-md-status-" + st.kind },
+      h("span", { className: "swf-md-status-i" }, st.icon),
+      h("span", { className: "swf-md-status-b" }, mdNodes(mdInline(mdStatusRest(b.v)), key + "-b")),
     );
   }
   return h("p", { key: key, className: "swf-md-p" }, mdNodes(mdInline(b.v), key));
@@ -2220,12 +2268,25 @@ function mdToHtml(md) {
         return "<" + tag + ">" + b.items.map((it) => "<li>" + mdInlineHtml(it) + "</li>").join("") + "</" + tag + ">";
       }
       if (b.t === "table") {
+        // 与面板同构：外层横向滚动容器（长图里表格同样可能超宽）
         return (
-          "<table><thead><tr>" +
+          '<div class="md-table-wrap"><table><thead><tr>' +
           b.head.map((c) => "<th>" + mdInlineHtml(c) + "</th>").join("") +
           "</tr></thead><tbody>" +
           b.rows.map((r) => "<tr>" + r.map((c) => "<td>" + mdInlineHtml(c) + "</td>").join("") + "</tr>").join("") +
-          "</tbody></table>"
+          "</tbody></table></div>"
+        );
+      }
+      const st = mdStatusOf(b.v);
+      if (st) {
+        return (
+          '<div class="md-status md-status-' +
+          st.kind +
+          '"><span class="md-status-i">' +
+          escHtml(st.icon) +
+          '</span><span class="md-status-b">' +
+          mdInlineHtml(mdStatusRest(b.v)) +
+          "</span></div>"
         );
       }
       return "<p>" + mdInlineHtml(b.v) + "</p>";
@@ -2309,7 +2370,8 @@ const REPORT_CSS =
     ".callout-warn{border-color:#f59e0b;background:rgba(245,158,11,.10)}" +
     ".callout-danger{border-color:#dc2626;background:rgba(220,38,38,.07)}" +
     // AI 正文（Markdown）
-    ".md{font-size:13.5px;line-height:1.78}" +
+    // 与面板 .swf-ai-md 统一：同一份 AI 正文在面板与长图里字号 / 行高必须一致
+    ".md{font-size:13px;line-height:1.75}" +
     ".md h1{font-size:19px;margin:18px 0 10px;padding-bottom:6px;border-bottom:1px solid #eceef1}" +
     ".md h2{font-size:15.5px;color:#111827;margin:20px 0 9px;padding-left:9px;border-left:3px solid #16a34a}" +
     ".md h3{font-size:14px;color:#111827;margin:15px 0 7px}" +
@@ -2322,9 +2384,25 @@ const REPORT_CSS =
     ".md code{background:#f0f1f3;padding:1px 5px;border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}" +
     ".md-pre{background:#f7f8fa;border:1px solid #eceef1;border-radius:8px;padding:10px 12px;overflow:auto;font-size:12.5px;white-space:pre}" +
     ".md hr{border:none;border-top:1px solid #eceef1;margin:16px 0}" +
+    // 表格：横向滚动容器（长图宽度固定 760px，列多时同样会挤），首列吸附
+    ".md-table-wrap{margin:11px 0;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;-webkit-overflow-scrolling:touch}" +
+    ".md-table-wrap table{margin:0;width:100%}" +
     ".md table{border-collapse:collapse;width:100%;margin:11px 0;font-size:12.5px}" +
-    ".md th,.md td{border:1px solid #e5e7eb;padding:6px 9px;text-align:left}" +
+    ".md th,.md td{border:1px solid #e5e7eb;padding:6px 9px;text-align:left;white-space:nowrap}" +
+    ".md-table-wrap th:first-child,.md-table-wrap td:first-child{position:sticky;left:0;background:#fff;z-index:1}" +
+    ".md-table-wrap th:first-child{background:#f7f8fa;z-index:2}" +
     ".md th{background:#f7f8fa}" +
+    // 状态条：与面板 .swf-md-status 同构（模型只写 emoji，样式在渲染层）
+    ".md-status{display:flex;gap:7px;align-items:flex-start;margin:9px 0;padding:9px 12px;border-radius:8px;border-left:3px solid #d1d5db;background:#f7f8fa;line-height:1.75}" +
+    ".md-status-i{flex:0 0 auto;font-size:13px;line-height:1.75}" +
+    ".md-status-b{flex:1 1 auto;min-width:0}" +
+    ".md-status-ok{border-left-color:#16a34a;background:rgba(22,163,74,.06)}" +
+    ".md-status-warn{border-left-color:#f59e0b;background:rgba(245,158,11,.08)}" +
+    ".md-status-danger{border-left-color:#dc2626;background:rgba(220,38,38,.06)}" +
+    ".md-status-tip{border-left-color:#2563eb;background:rgba(37,99,235,.06)}" +
+    ".md-status-info{border-left-color:#64748b;background:rgba(100,116,139,.06)}" +
+    ".md-status-note{border-left-color:#9ca3af;background:rgba(156,163,175,.08)}" +
+    ".md-status-hot{border-left-color:#f97316;background:rgba(249,115,22,.08)}" +
     ".md a{color:#2563eb;text-decoration:none}" +
     "footer{margin-top:26px;padding-top:13px;border-top:1px solid #eceef1;color:#9ca3af;font-size:11px;line-height:1.7}";
 

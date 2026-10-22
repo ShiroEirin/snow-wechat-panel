@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -165,6 +165,16 @@ ok(
   ]).text === "长得多的一段正文，用来代表成稿",
 );
 ok("全部为空但有工具调用 -> 仍判 toolPending", multi([{ role: "assistant", content: "", toolCallsJson: "[]" }]).toolPending === true);
+
+console.log("mdStatus（状态行自动上色）");
+ok("✅ 识别为 ok", lib.mdStatusOf("✅ 三条结论").kind === "ok");
+ok("🚨 识别为 danger", lib.mdStatusOf("🚨 风险").kind === "danger");
+ok("💡 识别为 tip", lib.mdStatusOf("💡 顺带一提").kind === "tip");
+// ⚠️ 是 U+26A0 + U+FE0F 两个码点：按码点取首字符会漏掉 VS16，必须用正则
+ok("⚠️（带 VS16）识别为 warn", lib.mdStatusOf("⚠️ 风险提示").kind === "warn");
+ok("普通段落不识别", lib.mdStatusOf("普通文字") === null);
+eq("剥掉图标与空白", lib.mdStatusRest("✅ 三条结论"), "三条结论");
+eq("剥掉带 VS16 的图标", lib.mdStatusRest("⚠️ 风险提示"), "风险提示");
 
 console.log("stripAiJson");
 const norm = (s) => String(s).replace(/\n+/g, "\n");
