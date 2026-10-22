@@ -239,6 +239,8 @@ const DEEP_LENSES = [
   ["sentiment", "情绪走向", "群氛围如何变化、哪些时段出现明显情绪转折"],
   ["risks", "争议与风险", "有哪些冲突点、潜在隐患、被压下去的不同意见"],
   ["quotes", "金句与原文", "值得留存的原文摘录（必须逐字摘录，不要改写）"],
+  // 逆天/整活：与 quotes 同源（都要原文），但要求「挑最离谱的」而不是「值得留存的」
+  ["wild", "逆天与名场面", "谁说了最离谱的话、哪句最像串子、哪些是全场最佳整活（必须逐字摘原文，并给出为什么离谱）"],
 ];
 
 /** 按当前维度开关过滤出要跑的视角。 */
@@ -247,6 +249,7 @@ function activeDeepLenses(dims) {
   return DEEP_LENSES.filter(([key]) => {
     if (key === "people") return !!d.titles || !!d.profile;
     if (key === "risks") return !!d.risks || !!d.controversies;
+    if (key === "wild") return !!d.quotes;
     return !!d[key];
   });
 }
@@ -536,6 +539,22 @@ function aiChartNodes(data) {
             ),
           )
         : null,
+      aiData && Array.isArray(aiData.wild_moments) && aiData.wild_moments.length
+        ? h(
+            "div",
+            null,
+            h("div", { className: "swf-sub" }, h("span", { className: "swf-ico" }, "🌪"), "逆天瞬间"),
+            aiData.wild_moments.map((x, i) =>
+              h(
+                "div",
+                { className: "swf-quote-card swf-wild-card", key: "wild-" + i },
+                x.who ? h("b", null, String(x.who) + (x.time ? " " + String(x.time) : "") + "：") : null,
+                String(x.text || ""),
+                x.why ? h("span", { className: "swf-note" }, "（" + String(x.why) + "）") : null,
+              ),
+            ),
+          )
+        : null,
       aiData && aiData.profile && typeof aiData.profile === "object"
         ? h(
             "div",
@@ -628,6 +647,8 @@ function aiJsonFields(dims, limits) {
   if (d.controversies) fields.push('  "controversies": [{"topic": "争议话题", "level": 0, "reason": "为什么"}]');
   if (d.titles) fields.push('  "titles": [{"who": "谁", "title": "称号", "reason": "依据"}]');
   if (d.quotes) fields.push('  "quotes": [{"who": "谁", "text": "原话", "why": "为什么值得记住"}]');
+  // 逆天瞬间：与 quotes 同源（都要原文），但语义是「离谱」而不是「值得记住」
+  if (d.quotes) fields.push('  "wild_moments": [{"who": "谁", "time": "HH:MM", "text": "原文逐字", "why": "为什么逆天"}]');
   if (d.profile) fields.push('  "profile": {"summary": "群画像一句话", "style": "交流风格", "advice": ["行动建议"]}');
   // 观察与建议：放结尾 —— 主观判断必须在事实之后，读者先看依据再看判断
   fields.push('  "insights": ["见解（2-3 条，主观判断与建议，每条要能指出依据）"]');
@@ -646,6 +667,11 @@ function aiJsonConstraints(dims, limits) {
   if (d.controversies) out.push("- controversies level 取 0-5。");
   if (d.titles) out.push("- titles 1-" + (lim.titles || 5) + " 个（可以是趣味称号，但必须给依据）。");
   if (d.quotes) out.push("- quotes 1-" + (lim.quotes || 5) + " 条，必须是原文摘录。");
+  if (d.quotes) out.push(
+    "- wild_moments 3-5 条，挑**最逆天**的发言：判定标准是颠覆常识的脑洞 / 逻辑跳脱 / 强烈反差 / 一本正经地胡说八道 / 突然暴论；" +
+      "优先级 暴论与争议 > 离谱类比 > 逻辑跳脱 > 趣味调侃；**剔除**纯玩梗与网络热词堆砌；" +
+      "text 必须能在原文里逐字找到，time 用原文消息的时间（HH:MM），why 一句话说清离谱在哪；没有就给空数组，不要硬凑。",
+  );
   if (d.profile) out.push("- profile.advice 2-4 条，面向群管理员或参与者。");
   out.push("- insights 2-3 条，是主观判断与建议（面板会标注为「主观」），每条都要能指出依据；没把握就给空数组。");
   out.push("- 没有数据的字段给空数组 / 空对象，不要编造。");
@@ -908,6 +934,7 @@ function deepFinalPrompt(o) {
   if (dims.todos) lines.push(idx++ + ". 关键结论 / 待办 / 需要谁跟进");
   if (dims.risks) lines.push(idx++ + ". 争议点与风险");
   if (dims.sentiment) lines.push(idx++ + ". 群氛围与情绪走向（结合统计与原文，不要编造）");
+  if (dims.quotes) lines.push(idx++ + ". 今日逆天瞬间（3-5 条：谁、几点、原文逐字、为什么离谱；没有就写「今天没有逆天发言」）");
   lines.push("", "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：", "{");
   lines.push(aiJsonFields(dims, limits).join(",\n"));
   lines.push("}");
@@ -2504,6 +2531,23 @@ function buildReportHtml(opts) {
           .join(""),
     );
   }
+  if (list(ai.wild_moments).length) {
+    aiBlocks.push(
+      '<div class="sec">逆天瞬间</div>' +
+        list(ai.wild_moments)
+          .map(
+            (x) =>
+              '<div class="quote"><b>' +
+              escHtml(x.who || "?") +
+              (x.time ? " " + escHtml(x.time) : "") +
+              "：</b>" +
+              escHtml(x.text) +
+              (x.why ? '<span class="muted">（' + escHtml(x.why) + "）</span>" : "") +
+              "</div>",
+          )
+          .join(""),
+    );
+  }
   if (ai.profile && typeof ai.profile === "object") {
     aiBlocks.push(
       '<div class="sec">群画像</div>' +
@@ -2601,7 +2645,9 @@ function buildMemberHtml(opts) {
   const quoteRows = (p.top_quoted || []).slice(0, 8).map((x) => ({ name: x.name, count: Number(x.count) || 0 }));
   const quotedRows = (p.quoted_by || []).slice(0, 8).map((x) => ({ name: x.name, count: Number(x.count) || 0 }));
 
-  const aiText = String(o.aiText || "").trim();
+  // 长图的 AI 正文必须与面板同源：先剥掉结构化数据块，否则末尾会挂着一大坨裸 JSON
+  //（面板卡片用的是 stripAiJson(memberAiText)，长图此前漏了这一步）
+  const aiText = stripAiJson(String(o.aiText || "")).trim();
   const aiHtml = aiText ? '<div class="sec">AI 角色分析</div><div class="md">' + mdToHtml(aiText) + "</div>" : "";
   // Hero 导语优先用 AI 的结构化「人物素描」，没有就从正文里截一段（不编造）
   const persona = o.aiData && o.aiData.persona ? String(o.aiData.persona) : "";
@@ -4070,6 +4116,7 @@ function WechatPanel({ api, locale }) {
     if (dims.todos) lines.push(idx++ + ". 关键结论 / 待办 / 需要谁跟进");
     if (dims.risks) lines.push(idx++ + ". 争议点与风险");
     if (dims.sentiment) lines.push(idx++ + ". 群氛围与情绪走向（结合统计与原文，不要编造）");
+    if (dims.quotes) lines.push(idx++ + ". 今日逆天瞬间（3-5 条：谁、几点、原文逐字、为什么离谱；没有就写「今天没有逆天发言」）");
 
     lines.push("", "第二部分：在正文最后追加结构化数据块，只放结构化数据、不要写注释：", "{");
     // 字段与约束由模块级生成器提供：深挖汇总阶段共用同一份 schema，避免两处分叉
@@ -4605,6 +4652,7 @@ function WechatPanel({ api, locale }) {
         "",
         "取数建议（wechat MCP）：",
         "- get_member_profile(member=\"" + uname + "\", session_id" + (allTime ? "" : ", start, end") + ", top_n=10, include_samples=80)：画像 + 该成员最近 80 条原文，一次取齐（够覆盖当日大部分发言；找「逆天瞬间」必须看原文）",
+        "  ⚠️ 返回的 samples[] 每条都带 `time`（精确到秒）—— 引用原文时**必须**用这个时间，不要自己推断「凌晨 / 傍晚 / 半夜」",
         "- get_messages_by_range(session_id" + (allTime ? "" : ", start, end") + ", sender=\"" + uname + "\", limit=200, offset, order=\"desc\")：需要更多原文时按该成员翻页（服务端已按发言人过滤，不用自己筛）",
         "",
         "输出分两部分。",
@@ -4619,13 +4667,14 @@ function WechatPanel({ api, locale }) {
         "",
         "结构：",
         "1. **一句话定性** —— TA 在这个群里是谁（带梗，但要准）",
-        "2. **名场面** —— 1-3 个最有代表性的瞬间，每条逐字摘原文（不要改写）",
+        "2. **名场面** —— 1-3 个最有代表性的瞬间，每条逐字摘原文（不要改写）；时间写 samples 里的 HH:MM，不要自己推断时段",
         "3. **逆天瞬间** —— 从原文里挑 1-3 条 TA 最离谱的发言：逐字引用 + 半句吐槽",
         "   - 「逆天」的判定标准：颠覆常识的脑洞 / 逻辑跳脱 / 强烈反差 / 一本正经地胡说八道 / 突然暴论 / 神逻辑",
         "   - 优先级（从高到低）：暴论与争议 > 离谱类比 > 逻辑跳脱 > 趣味调侃",
         "   - **剔除**：单纯玩梗、网络热词堆砌、无内容的刷屏、复读别人",
         "   - 如果 TA 这段时间确实很正常，就写「今天很稳，没有逆天发言」，**不要硬凑**",
-        "   - 每条格式：先 `> 原文逐字` 引用，下一行写「—— 为什么离谱（一句话，可以损） 」",
+        "   - 每条格式：（HH:MM，必须来自 samples[].time）先 `> 原文逐字` 引用，下一行写「—— 为什么离谱（一句话，可以损）」",
+        "   - **禁止**自己推断时段（「凌晨」「半夜」「傍晚」），时间错会直接毁掉可信度",
         "4. **语言指纹** —— 口头禅 / 语气 / 标点与长度习惯（结合 tone_words / top_phrases / samples）",
         "5. **社交位置** —— 常和谁互动、在什么话题里冒头、扮演什么角色",
         "6. **一句忠告** —— 给 TA 或群主的（可以损，但要有用）",
@@ -5161,6 +5210,17 @@ function WechatPanel({ api, locale }) {
         lines.push("");
         lines.push("## 金句");
         list(aiData.quotes).forEach((x) => lines.push("> " + String(x.text || "") + " —— " + String(x.who || "")));
+      }
+      if (list(aiData.wild_moments).length) {
+        lines.push("");
+        lines.push("## 逆天瞬间");
+        list(aiData.wild_moments).forEach((x) =>
+          lines.push(
+            "> " + String(x.text || "") + " —— " + String(x.who || "") +
+              (x.time ? " " + String(x.time) : "") +
+              (x.why ? "（" + String(x.why) + "）" : ""),
+          ),
+        );
       }
       if (aiData.profile && typeof aiData.profile === "object") {
         lines.push("");
