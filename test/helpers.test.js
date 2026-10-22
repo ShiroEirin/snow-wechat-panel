@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -253,6 +253,18 @@ ok("差距明显时提示含引用字数", lib.quoteCharsHint({ chars: 2456, cha
 ok("差距不大时不打扰", lib.quoteCharsHint({ chars: 100, chars_total: 105 }) === "");
 ok("没有 chars_total 时为空串", lib.quoteCharsHint({ chars: 100 }) === "");
 ok("chars_total 小于等于 chars 时为空串", lib.quoteCharsHint({ chars: 100, chars_total: 100 }) === "");
+
+console.log("memberRangeText（成员画像实际查询范围）");
+// 回归：画像此前不显示查询范围，用户无法判断「130 条」到底是一天还是整段。
+// 只认 MCP 回显的 time_range（范围变化后自动重取到的就是这份），null = 全部历史。
+ok(
+  "有范围时截到分钟",
+  lib.memberRangeText({ time_range: { start: "2026-10-01 00:00:00", end: "2026-10-21 23:59:59" } }) ===
+    "2026-10-01 00:00 ~ 2026-10-21 23:59",
+);
+ok("不限范围（MCP 返回 null）显示全部历史", lib.memberRangeText({ time_range: null }) === "全部历史");
+ok("没有 profile 时不崩", lib.memberRangeText(null) === "全部历史");
+ok("字段缺失时回退全部历史", lib.memberRangeText({ time_range: { start: "2026-10-01" } }) === "全部历史");
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);
 process.exit(fail === 0 ? 0 : 1);

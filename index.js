@@ -2932,6 +2932,15 @@ function rangeBound(dateValue, timeValue, isEnd) {
   return d + " " + tv + (isEnd ? ":59" : ":00");
 }
 
+/** 成员画像实际查询范围：用 MCP 回显的 time_range（比面板 state 更可信）；
+    不限范围时 MCP 返回 null → 「全部历史」。 */
+function memberRangeText(profile) {
+  const r = profile && profile.time_range;
+  if (!r || !r.start || !r.end) return "全部历史";
+  const short = (v) => String(v).slice(0, 16);
+  return short(r.start) + " ~ " + short(r.end);
+}
+
 /** 把群名等任意文本转成安全的文件名片段（Windows 非法字符 + 空白）。 */
 function safeFileName(name, fallback) {
   const s = String(name || "")
@@ -3538,6 +3547,9 @@ function WechatPanel({ api, locale }) {
   const aiTargetRef = useRef("group");
   // 成员分析代次：切换/收起成员时自增，让旧请求的后续回调直接作废（避免复活订阅）
   const memberGenRef = useRef(0);
+  // 上一次成员画像请求的口径（成员 + 范围）：顶栏范围一变就用新口径重取，
+  // 否则画像会一直停在打开时的那个范围 —— 看起来就像「没集成时间参数」。
+  const memberReqRef = useRef(null);
 
   /* ---- 深挖流水线：与单轮 AI 管线完全隔离（独立 state / 独立 ref / 独立代次 / 独立会话） ---- */
   // 分析档位：quick = 速览（1 轮浅取数）、standard = 现有单轮深度分析、deep = 多阶段深挖
@@ -4011,6 +4023,7 @@ function WechatPanel({ api, locale }) {
     setAiBusy(false);
     setCreated(null);
     // 成员画像与它的 AI 分析
+    memberReqRef.current = null;
     setMemberProfile(null);
     setMemberBusy(false);
     setMemberAiText("");
@@ -4114,8 +4127,16 @@ function WechatPanel({ api, locale }) {
       stopMemberAiStream();
       // 不限时间范围 = 不传 start/end（MCP 语义：该成员的全部历史发言）
       const allTime = typeof allTimeOverride === "boolean" ? allTimeOverride : memberAllTime;
+      // 每次请求自增代次：连续切人 / 顶栏改范围时，慢的旧请求不会覆盖新结果
+      const gen = ++memberGenRef.current;
+      // 记录本次口径，供「范围变化 → 自动重取」比对（allTime 下不带 start/end）
+      memberReqRef.current = {
+        username: username,
+        allTime: allTime,
+        start: allTime ? "" : rangeStart,
+        end: allTime ? "" : rangeEnd,
+      };
       setMemberMsg("");
-      const gen = memberGenRef.current;
       setMemberBusy(true);
       setMemberProfile(null);
       setMemberAiBusy(false);
@@ -4163,6 +4184,18 @@ function WechatPanel({ api, locale }) {
     [api, sessionId, rangeStart, rangeEnd, memberAllTime, stopMemberAiStream],
   );
 
+  /* 顶栏时间范围一变，已打开的成员画像立刻按新口径重取。
+     此前只在「点成员」那一刻取数：改完日期，画像仍停在打开时的范围（默认通常是「今天」），
+     看上去就像查找功能根本没接时间参数。 */
+  const memberRangeKey = memberAllTime ? "all" : rangeStart + "~" + rangeEnd;
+  useEffect(() => {
+    const req = memberReqRef.current;
+    if (!req) return;
+    const key = req.allTime ? "all" : req.start + "~" + req.end;
+    if (key === memberRangeKey) return;
+    loadMemberProfile(req.username, memberAllTime);
+  }, [memberRangeKey, memberAllTime, loadMemberProfile]);
+
   /* ---- 成员检索：list_chatroom_members 按昵称 / 备注 / wxid 找榜外成员 ---- */
   const searchMembers = useCallback(async () => {
     if (!sessionId) return;
@@ -4197,6 +4230,8 @@ function WechatPanel({ api, locale }) {
   const closeMemberProfile = useCallback(() => {
     stopMemberAiStream();
     setMemberBusy(false);
+    // 关掉后不再有「当前成员」：清掉请求记录，否则改顶栏范围会把这个画像重新拉起来
+    memberReqRef.current = null;
     setMemberProfile(null);
     setMemberMsg("");
     setMemberAiBusy(false);
@@ -4937,9 +4972,9 @@ function WechatPanel({ api, locale }) {
     lines.push("");
     lines.push("> 群：" + group + "（" + sessionId + "）");
     lines.push("> 成员：" + name + (uname ? "（" + uname + "）" : ""));
-    lines.push("> 时间范围：" + (memberAllTime ? "不限（全部历史）" : rangeStart + " ~ " + rangeEnd));
+    lines.push("> 时间范围：" + memberRangeText(memberProfile));
     lines.push("");
-    lines.push("## 统计事实（MCP 全量聚合）");
+    lines.push("## 统计事实（MCP 聚合）");
     lines.push(
       "- 消息 " + fmtNum(total) + " 条 · 字数 " + fmtNum(Number(s.chars) || 0) +
       (quoteCharsHint(s) ? "（" + quoteCharsHint(s) + "）" : "") +
@@ -5018,7 +5053,8 @@ function WechatPanel({ api, locale }) {
         memberName: memberName,
         profile: memberProfile,
         avatarSrc: (memberProfile.member && avatars[memberProfile.member.username]) || "",
-        rangeLabel: memberAllTime ? "不限时间范围（全部历史）" : rangeStart + " ~ " + rangeEnd,
+        // 用 MCP 回显的实际口径（而不是面板 state）：范围变化后自动重取到的就是这一份
+        rangeLabel: memberRangeText(memberProfile),
         aiText: memberAiText,
         aiData: memberAiData,
         generatedAt: new Date().toLocaleString(),
@@ -6664,7 +6700,7 @@ function WechatPanel({ api, locale }) {
             h(
               "div",
               { className: "swf-note", style: { margin: "0 4px 6px" } },
-              "统计事实（MCP 全量聚合）：消息 / 字数 / 活跃天数 / 占比与节奏；语义与角色定位见下方「AI 角色分析」。",
+              "统计事实（MCP 聚合 · " + memberRangeText(memberProfile) + "）：消息 / 字数 / 活跃天数 / 占比与节奏；语义与角色定位见下方「AI 角色分析」。",
             ),
             h(
               "div",
