@@ -243,15 +243,81 @@ const DEEP_LENSES = [
   ["wild", "逆天与名场面", "谁说了最离谱的话、哪句最像串子、哪些是全场最佳整活（必须逐字摘原文，并给出为什么离谱）"],
 ];
 
-/** 按当前维度开关过滤出要跑的视角。 */
-function activeDeepLenses(dims) {
+/** 视角的保留优先级：被跨度裁到只剩几个时按这个顺序留。
+    依据 —— 话题脉络与人物关系是任何群分析的骨架；争议是「值得深挖」的理由本身；
+    逆天与名场面是娱乐向留存点；待办 / 情绪 / 金句都可以并进上面几者的正文里。 */
+const DEEP_LENS_PRIORITY = ["topics", "people", "risks", "wild", "todos", "sentiment", "quotes"];
+
+/** 时间范围 → 跨度天数（无法解析时按 1 天算，走最窄档）。 */
+function rangeDaysOf(rangeStart, rangeEnd) {
+  const from = new Date(String(rangeStart || "").replace(" ", "T"));
+  const to = new Date(String(rangeEnd || "").replace(" ", "T"));
+  if (isNaN(from.getTime()) || isNaN(to.getTime()) || to <= from) return 1;
+  return (to.getTime() - from.getTime()) / 86400000;
+}
+
+/** 跨度 → 视角上限。日级 4 个已经能覆盖整天；月级才值得全开。 */
+function deepLensCap(days) {
+  const d = Number(days) || 0;
+  if (d <= 1.5) return 4;
+  if (d <= 7.5) return 5;
+  return 7;
+}
+
+/** 跨度 → 交叉验证的代理数。日级用**单代理**统一对账 ——
+    拆成多人才是反的：每个子代理只看自己那一条，恰恰看不见跨视角矛盾。
+    周级 2 人、月级 4 人。 */
+function deepVerifyWidth(days) {
+  const d = Number(days) || 0;
+  if (d <= 1.5) return 1;
+  if (d <= 7.5) return 2;
+  return 4;
+}
+
+/** 阶段间正文裁剪：头尾保留 + 中间打点。
+    为什么必须有 —— 早期是「上一阶段全文原样接力」，日报第 3 阶段的 prompt 会滚到
+    49176 字（①1.6k → ②29k → ③49k），直接把宿主的消息渲染打崩（RangeError 栈溢出）。
+    阶段之间只需要结论与依据，不需要对方的整篇散文。 */
+function clipForStage(text, max) {
+  const s = String(text || "");
+  const cap = Number(max) || 0;
+  if (!cap || s.length <= cap) return s;
+  const head = Math.ceil(cap * 0.6);
+  const tail = Math.max(0, cap - head);
+  return (
+    s.slice(0, head) +
+    "\n\n……（中间省略 " +
+    (s.length - head - tail) +
+    " 字；需要细节请自行用 search_wechat_messages / get_messages_by_range 回查）……\n\n" +
+    (tail ? s.slice(s.length - tail) : "")
+  );
+}
+
+/** 阶段间正文的体积上限（字符）。实测：不限的时候日报第③阶段会到 49176 字，
+    宿主渲染直接栈溢出。这几个数是「够用且安全」的平衡点。 */
+const DEEP_CLIP = { facts: 9000, verifyPrev: 22000, finalPrev: 26000 };
+
+/** 按当前维度开关过滤出要跑的视角，再按跨度裁剪到上限（结果保持 DEEP_LENSES 原顺序）。 */
+function activeDeepLenses(dims, days) {
   const d = dims || {};
-  return DEEP_LENSES.filter(([key]) => {
+  const enabled = DEEP_LENSES.filter(([key]) => {
     if (key === "people") return !!d.titles || !!d.profile;
     if (key === "risks") return !!d.risks || !!d.controversies;
     if (key === "wild") return !!d.quotes;
     return !!d[key];
   });
+  const cap = deepLensCap(days === undefined ? 1 : days);
+  if (enabled.length <= cap) return enabled;
+  const keep = {};
+  DEEP_LENS_PRIORITY.slice(0, cap).forEach((k) => {
+    keep[k] = true;
+  });
+  const picked = enabled.filter(([k]) => keep[k]);
+  // 优先级里的视角可能被维度开关关掉了 → 用原顺序补齐到 cap
+  enabled.forEach((item) => {
+    if (picked.length < cap && picked.indexOf(item) < 0) picked.push(item);
+  });
+  return DEEP_LENSES.filter((item) => picked.indexOf(item) >= 0);
 }
 
 /** 统计基线文本：面板手里的全量 SQL 聚合，注入每一轮当「测谎仪」。
@@ -299,8 +365,9 @@ function buildStatsBrief(stats, current, sessionId, rangeStart, rangeEnd) {
   return lines.join("\n");
 }
 
-/** 深挖分段规划：日报按小时切、周报按天切、月报按等分切；消息量太小就减半。
-    返回 [{ start, end }]，至少 2 段、最多 8 段。 */
+/** 深挖分段规划：分段是「数据装不下」时的手段，不是仪式。
+    日级一次就能读完，不分段；周级 2-3 段；月级及以上 4-8 段。
+    want > 0 时尊重用户在「分析设置」里显式选的段数。 */
 function planDeepSegments(rangeStart, rangeEnd, stats, want) {
   const from = new Date(String(rangeStart || "").replace(" ", "T"));
   const to = new Date(String(rangeEnd || "").replace(" ", "T"));
@@ -310,13 +377,15 @@ function planDeepSegments(rangeStart, rangeEnd, stats, want) {
   const days = hours / 24;
   let n = Number(want) || 0;
   if (!n) {
-    if (days <= 1.01) n = 4; // 日报：按小时切 4 段
-    else if (days <= 7.5) n = Math.min(8, Math.max(2, Math.round(days))); // 周报：按天切
-    else n = 8; // 月报及更长：等分 8 段
+    // 早期版本对日报也切 4 段，再叠 7 个视角 + 7 个验证 = 19 个子代理，纯属重复劳动。
+    if (days <= 1.5) n = 1; // 日报：不分段
+    else if (days <= 7.5) n = Math.min(3, Math.max(2, Math.round(days / 2.5))); // 周报：2-3 段
+    else n = Math.min(8, Math.max(4, Math.round(days / 10))); // 月报及更长：4-8 段
     const msgs = Number(stats && stats.total_messages) || 0;
-    if (msgs && msgs < 400 && n > 2) n = Math.max(2, Math.floor(n / 2));
+    if (msgs && msgs < 400 && n > 1) n = Math.max(1, Math.floor(n / 2));
   }
-  n = Math.max(2, Math.min(8, n));
+  n = Math.max(1, Math.min(8, n));
+  if (n <= 1) return single;
   const step = (to.getTime() - from.getTime()) / n;
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -770,22 +839,38 @@ function deepSegmentPrompt(o) {
     DEEP_WINDOW_NOTE,
     "本次分成 " + segs.length + " 段。",
     "",
-    "## 强制做法：并行分段（不要自己串行读）",
-    "请用 sub-agents-activate **一次性**派 " + segs.length + " 个子代理（agentId 用 agent_general），每人只负责一段：",
   ];
-  segs.forEach((s, i) => {
-    lines.push("  子代理 " + (i + 1) + "：[" + s.start + " ~ " + s.end + "]");
-  });
-  lines.push("");
-  DEEP_SUBAGENT_RULES.forEach((x) => lines.push(x));
+  if (segs.length <= 1) {
+    // 跨度不大时不要为了「看起来并行」而派子代理：一个人读一遍就够，
+    // 派 N 个只会把同一批消息重复读 N 次，既慢又放大上下文。
+    lines.push(
+      "## 做法：直接读，**不要**派子代理",
+      "本次跨度不大，一次就能读完，所以**不要**使用 sub-agents-activate（派了只是重复劳动）。",
+      "请直接读取 [" + (segs[0] ? segs[0].start + " ~ " + segs[0].end : "上述时间范围") + "] 的全部消息。",
+    );
+  } else {
+    lines.push(
+      "## 强制做法：并行分段（不要自己串行读）",
+      "请用 sub-agents-activate **一次性**派 " + segs.length + " 个子代理（agentId 用 agent_general），每人只负责一段：",
+    );
+    segs.forEach((s, i) => {
+      lines.push("  子代理 " + (i + 1) + "：[" + s.start + " ~ " + s.end + "]");
+    });
+    lines.push("");
+    DEEP_SUBAGENT_RULES.forEach((x) => lines.push(x));
+  }
   lines.push(
     "",
-    "子代理取数要求：",
+    "取数要求：",
     '- get_messages_by_range(session_id, start, end, limit=500, offset, order="asc") 反复翻页直到取完该段全部消息，不要只看第一页',
     "- 消息量大时优先记录有信息量的内容（讨论、结论、争议、数据、链接、文件名），表情与系统提示只需计数",
     "",
-    "每个子代理完成后，你输出一行进度标记（面板据此显示进度）：",
-    "[PROGRESS] 第 k/" + segs.length + " 段完成（消息 N 条）",
+    segs.length > 1
+      ? "每个子代理完成后，你输出一行进度标记（面板据此显示进度）："
+      : "读完后输出一行进度标记（面板据此显示进度）：",
+    segs.length > 1
+      ? "[PROGRESS] 第 k/" + segs.length + " 段完成（消息 N 条）"
+      : "[PROGRESS] 读完（消息 N 条，覆盖 " + (segs[0] ? segs[0].start + " ~ " + segs[0].end : "全窗口") + "）",
     "",
     "## 铁律：只提取事实，禁止下结论",
     "- 允许：谁在什么时候说了什么、讨论了什么主题、出现了什么数字/链接/文件、消息条数",
@@ -887,16 +972,34 @@ function deepVerifyPrompt(o) {
     "## 待审查的结论",
     o.prev,
     "",
-    "## 强制做法：并行分视角审查",
-    "请用 sub-agents-activate 派 " + lenses.length + " 个子代理，每人只审查一个视角：",
+    "## 审查方式（见下）",
   ];
-  lenses.forEach(([, label], i) => {
-    lines.push("  子代理 " + (i + 1) + "：审查「" + label + "」");
-  });
-  lines.push("");
-  DEEP_SUBAGENT_RULES.forEach((x) => lines.push(x));
+  const width = Math.max(1, Math.min(lenses.length || 1, Number(o.width) || 1));
+  if (width <= 1) {
+    // 单代理统一对账：跨视角矛盾只有「一个人同时看着所有结论」才审得出来，
+    // 拆成 N 个「每人一个视角」恰恰审不到矛盾本身（旧版就是每视角一个，白跑 7 个）。
+    lines.push(
+      "**做法：你一个人统一审查，不要派子代理。**",
+      "本次跨度不大，审查量一个人就能吃下；拆成多个子代理反而看不到跨视角矛盾。",
+      "需要审查的视角：" + lenses.map(([, label]) => "「" + label + "」").join("、"),
+    );
+  } else {
+    const groups = [];
+    for (let i = 0; i < width; i++) groups.push([]);
+    lenses.forEach((item, i) => groups[i % width].push(item));
+    lines.push(
+      "## 强制做法：并行审查（" + width + " 个代理）",
+      "请用 sub-agents-activate **一次性**派 " + width + " 个子代理，各自负责一组视角：",
+    );
+    groups.forEach((g, i) => {
+      lines.push("  子代理 " + (i + 1) + "：审查 " + g.map(([, label]) => "「" + label + "」").join("、"));
+    });
+    lines.push("");
+    DEEP_SUBAGENT_RULES.forEach((x) => lines.push(x));
+    lines.push("每个子代理的 prompt 必须**原样带上**上面的统计基线、事实底稿与待审查结论。");
+  }
   lines.push(
-    "每个子代理必须完成五件事，缺一不可：",
+    "**无论是你自己审还是子代理审，都必须完成五件事，缺一不可**：",
     "1. **对账**：结论里的每个数字 / 名次 / 人数，与统计基线逐项核对，不一致就列为 issue",
     "2. **查无据**：evidence 为「无据」或明显撑不起 claim 的，列为 issue",
     "3. **找遗漏**：该视角明显该提却没提的（例如有撤回、有争议却一字未提）",
@@ -905,7 +1008,9 @@ function deepVerifyPrompt(o) {
     "",
     "取证要求：鼓励用 search_wechat_messages / get_messages_by_range 回原文确认；凡断言「原文里没有」，必须先实际查过。",
     "",
-    "每个子代理完成后输出一行：[PROGRESS] 审查 k/" + lenses.length + " 完成",
+    width > 1
+      ? "每个子代理完成后输出一行：[PROGRESS] 审查 k/" + width + " 完成"
+      : "每审完一个视角输出一行：[PROGRESS] 已审「视角名」",
     "",
     "## 输出",
     "第一部分：Markdown（逐视角列问题）",
@@ -4704,16 +4809,20 @@ function WechatPanel({ api, locale }) {
       setDeepMsg("已有分析在运行，等它结束再开始深挖。");
       return;
     }
-    const lenses = activeDeepLenses(aiSettings.dims);
+    // 流水线宽度由跨度决定（日级窄、月级宽）—— 早期版本不管跨度都跑
+    // 4 段 + 7 视角 + 7 验证 = 19 个子代理，日报被当成月报处理。
+    const days = rangeDaysOf(rangeStart, rangeEnd);
+    const lenses = activeDeepLenses(aiSettings.dims, days);
     const segs = planDeepSegments(rangeStart, rangeEnd, stats, aiSettings.deep.segments);
     const verifyK = aiSettings.deep.verify;
+    const verifyWidth = deepVerifyWidth(days);
     const gen = ++deepGenRef.current;
     const plan = [
-      { id: "segment", label: DEEP_STAGE_LABELS.segment, detail: segs.length + " 段并行", status: "pending", convId: "", chars: 0, text: "", marks: [] },
+      { id: "segment", label: DEEP_STAGE_LABELS.segment, detail: segs.length > 1 ? segs.length + " 段并行" : "不分段", status: "pending", convId: "", chars: 0, text: "", marks: [] },
       { id: "lens", label: DEEP_STAGE_LABELS.lens, detail: lenses.length + " 个视角并行", status: "pending", convId: "", chars: 0, text: "", marks: [] },
     ];
     if (verifyK > 0) {
-      plan.push({ id: "verify", label: DEEP_STAGE_LABELS.verify, detail: lenses.length + " 个视角并行", status: "pending", convId: "", chars: 0, text: "", marks: [] });
+      plan.push({ id: "verify", label: DEEP_STAGE_LABELS.verify, detail: verifyWidth > 1 ? verifyWidth + " 个代理对账" : "单代理统一对账", status: "pending", convId: "", chars: 0, text: "", marks: [] });
     }
     plan.push({ id: "final", label: DEEP_STAGE_LABELS.final, detail: "1 轮", status: "pending", convId: "", chars: 0, text: "", marks: [] });
     setDeepSteps(plan);
@@ -4758,26 +4867,42 @@ function WechatPanel({ api, locale }) {
     };
 
     try {
-      // 阶段 1：并行分段读事实（只提取事实，不下结论）
+      // 阶段 1：分段读事实（只提取事实，不下结论）。日级不分段、不派子代理。
       const s1 = await runPhase("segment", deepSegmentPrompt(Object.assign({}, base, { segments: segs })));
       const facts = stripJsonBlock(s1.text) || String(s1.text || "");
       if (!facts.trim()) throw new Error("阶段 1 未产出事实底稿（可能超时或未按格式输出）");
+      // 阶段之间只传裁剪版：全文接力会让 prompt 体积逐级翻倍（见 DEEP_CLIP 注释）
+      const factsForNext = clipForStage(facts, DEEP_CLIP.facts);
       // 阶段 2：多视角并行挖掘（每条结论必须可溯源）
-      const s2 = await runPhase("lens", deepLensPrompt(Object.assign({}, base, { lenses: lenses, statsBrief: statsBrief, prev: facts })));
+      const s2 = await runPhase("lens", deepLensPrompt(Object.assign({}, base, { lenses: lenses, statsBrief: statsBrief, prev: factsForNext })));
+      const lensText = clipForStage(s2.text, DEEP_CLIP.verifyPrev);
       // 阶段 3：对抗式交叉验证（用基线对账 + 回原文取证）
-      let verified = String(s2.text || "");
+      let verified = lensText;
       if (verifyK > 0) {
         const s3 = await runPhase(
           "verify",
-          deepVerifyPrompt(Object.assign({}, base, { lenses: lenses, statsBrief: statsBrief, facts: facts, prev: String(s2.text || "") })),
+          deepVerifyPrompt(
+            Object.assign({}, base, {
+              lenses: lenses,
+              width: verifyWidth,
+              statsBrief: statsBrief,
+              facts: factsForNext,
+              prev: lensText,
+            }),
+          ),
         );
-        verified = String(s2.text || "") + "\n\n===== 审查意见（用于修正与删除无据结论） =====\n\n" + String(s3.text || "");
+        verified = lensText + "\n\n===== 审查意见（用于修正与删除无据结论） =====\n\n" + String(s3.text || "");
       }
       // 阶段 4：汇总成稿（沿用既有 JSON schema，图表与报告零改动复用）
       const s4 = await runPhase(
         "final",
         deepFinalPrompt(
-          Object.assign({}, base, { dims: aiSettings.dims, limits: aiSettings.limits, statsBrief: statsBrief, prev: verified }),
+          Object.assign({}, base, {
+            dims: aiSettings.dims,
+            limits: aiSettings.limits,
+            statsBrief: statsBrief,
+            prev: clipForStage(verified, DEEP_CLIP.finalPrev),
+          }),
         ),
       );
       setDeepText(stripJsonBlock(s4.text));
@@ -5093,15 +5218,17 @@ function WechatPanel({ api, locale }) {
     const to = new Date(String(rangeEnd || "").replace(" ", "T"));
     const hours = !isNaN(from.getTime()) && !isNaN(to.getTime()) ? Math.max(0, (to.getTime() - from.getTime()) / 3600000) : 0;
     const msgs = Number(stats && stats.total_messages) || 0;
-    const lenses = activeDeepLenses(aiSettings.dims).length;
+    const days = rangeDaysOf(rangeStart, rangeEnd);
+    const lenses = activeDeepLenses(aiSettings.dims, days).length;
     const segs = planDeepSegments(rangeStart, rangeEnd, stats, aiSettings.deep.segments).length;
     const verifyK = aiSettings.deep.verify;
+    const verifyWidth = deepVerifyWidth(days);
     // 日报是 00:00:00 ~ 23:59:59（23.9999 小时），阈值取 23 才不会把「整天」误判成短时段
     const recommend = hours >= 23 || msgs >= DEEP_RECOMMEND.busyMessages ? "deep" : "standard";
     const stages = verifyK > 0 ? 4 : 3;
-    // Agent 内部并行派子代理：阶段 1 派 segs 个，阶段 2 / 3 各派 lenses 个
-    const subAgents = segs + lenses * (verifyK > 0 ? 2 : 1);
-    return { hours: hours, msgs: msgs, lenses: lenses, segs: segs, verifyK: verifyK, recommend: recommend, stages: stages, subAgents: subAgents };
+    // 子代理数：阶段 1 只有分段时才派（日级不分段、自己读）；阶段 2 派 lenses 个；阶段 3 派 verifyWidth 个
+    const subAgents = (segs > 1 ? segs : 0) + lenses + (verifyK > 0 ? verifyWidth : 0);
+    return { hours: hours, msgs: msgs, lenses: lenses, segs: segs, verifyK: verifyK, verifyWidth: verifyWidth, days: days, recommend: recommend, stages: stages, subAgents: subAgents };
   }, [rangeStart, rangeEnd, stats, aiSettings]);
 
   // 结果槽：按当前档位优先，缺则回退另一档 —— 界面与报告同源，避免「看到 A 却报告写 B」
@@ -7059,7 +7186,7 @@ function WechatPanel({ api, locale }) {
           { className: "swf-adv-limits" },
           [
             ["segments", "深挖段数", [[0, "自动"], [2, "2 段"], [4, "4 段"], [6, "6 段"], [8, "8 段"]]],
-            ["verify", "交叉验证", [[0, "关闭"], [1, "每视角一轮"]]],
+            ["verify", "交叉验证", [[0, "关闭"], [1, "开启（统一对账）"]]],
           ].map(([key, label, opts]) =>
             h(
               "label",
@@ -7080,7 +7207,7 @@ function WechatPanel({ api, locale }) {
         h(
           "div",
           { className: "swf-note" },
-          "深挖段数「自动」= 日报 4 段（按小时）、周报按天、月报 8 段；消息量很小会自动减半。交叉验证开启后，每个视角都会被独立审查一轮（对账 + 查无据 + 找遗漏 + 找矛盾）。",
+          "深挖宽度由跨度自动决定：日报 = 1 段 / 4 视角 / 1 个验证代理（约 5 个子代理）；周报 = 2-3 段 / 5 视角 / 2 个；月报 = 4-8 段 / 7 视角 / 4 个。段数选「自动」即按此表，手动指定段数会覆盖自动值。交叉验证开启后，审查员用统计基线逐条对账（对账 + 查无据 + 找遗漏 + 找矛盾 + 查冗余），日级由单个代理统一审 —— 跨视角矛盾只有一个人同时看得到才审得出来。",
         ),
         h(
           "div",

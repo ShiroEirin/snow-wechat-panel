@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -265,6 +265,53 @@ ok(
 ok("不限范围（MCP 返回 null）显示全部历史", lib.memberRangeText({ time_range: null }) === "全部历史");
 ok("没有 profile 时不崩", lib.memberRangeText(null) === "全部历史");
 ok("字段缺失时回退全部历史", lib.memberRangeText({ time_range: { start: "2026-10-01" } }) === "全部历史");
+console.log("深挖流水线宽度（按跨度缩放）");
+// 回归：早期版本不管跨度都跑「4 段 + 7 视角 + 7 验证 = 19 个子代理」，
+// 日报被当成月报处理；第③阶段的 prompt 因此滚到 49176 字，把宿主渲染打崩。
+const day = ["2026-10-22 00:00:00", "2026-10-22 23:59:59"];
+const week = ["2026-10-01 00:00:00", "2026-10-07 23:59:59"];
+const month = ["2026-10-01 00:00:00", "2026-10-31 23:59:59"];
+const bigGroup = { total_messages: 5000 };
+
+ok("rangeDaysOf 日跨度≈1", Math.abs(lib.rangeDaysOf(day[0], day[1]) - 1) < 0.01);
+ok("rangeDaysOf 非法输入回退 1 天", lib.rangeDaysOf("", "") === 1);
+
+eq("deepLensCap 日级 4 个", lib.deepLensCap(lib.rangeDaysOf(day[0], day[1])), 4);
+eq("deepLensCap 周级 5 个", lib.deepLensCap(lib.rangeDaysOf(week[0], week[1])), 5);
+eq("deepLensCap 月级 7 个", lib.deepLensCap(lib.rangeDaysOf(month[0], month[1])), 7);
+
+eq("deepVerifyWidth 日级单代理", lib.deepVerifyWidth(lib.rangeDaysOf(day[0], day[1])), 1);
+eq("deepVerifyWidth 周级 2 个", lib.deepVerifyWidth(lib.rangeDaysOf(week[0], week[1])), 2);
+eq("deepVerifyWidth 月级 4 个", lib.deepVerifyWidth(lib.rangeDaysOf(month[0], month[1])), 4);
+
+eq("planDeepSegments 日级不分段", lib.planDeepSegments(day[0], day[1], bigGroup, 0).length, 1);
+const weekSegs = lib.planDeepSegments(week[0], week[1], bigGroup, 0);
+ok("planDeepSegments 周级 2-3 段", weekSegs.length >= 2 && weekSegs.length <= 3);
+const monthSegs = lib.planDeepSegments(month[0], month[1], bigGroup, 0);
+ok("planDeepSegments 月级 4-8 段", monthSegs.length >= 4 && monthSegs.length <= 8);
+eq("planDeepSegments 尊重显式 want", lib.planDeepSegments(month[0], month[1], bigGroup, 6).length, 6);
+
+const allDims = { topics: true, todos: true, titles: true, sentiment: true, risks: true, quotes: true };
+eq(
+  "activeDeepLenses 日级裁到 4 个且按优先级",
+  lib.activeDeepLenses(allDims, 1).map((x) => x[0]),
+  ["topics", "people", "risks", "wild"],
+);
+eq("activeDeepLenses 月级全开 7 个", lib.activeDeepLenses(allDims, 30).length, 7);
+eq(
+  "activeDeepLenses 维度开关少于此数时不做补齐",
+  lib.activeDeepLenses({ topics: true, quotes: true }, 1).map((x) => x[0]),
+  ["topics", "quotes", "wild"],
+);
+
+console.log("clipForStage（阶段间裁剪）");
+ok("未超限时原样返回", lib.clipForStage("abc", 100) === "abc");
+const longText = "A".repeat(5000) + "B".repeat(5000);
+const clipped = lib.clipForStage(longText, 1000);
+ok("超限时裁到上限附近", clipped.length < 1300);
+ok("裁剪后带省略标记", clipped.indexOf("中间省略") >= 0);
+ok("裁剪后保留尾部", clipped.indexOf("B".repeat(50)) >= 0);
+
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);
 process.exit(fail === 0 ? 0 : 1);
