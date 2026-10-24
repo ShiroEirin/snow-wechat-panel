@@ -3037,6 +3037,23 @@ function rangeBound(dateValue, timeValue, isEnd) {
   return d + " " + tv + (isEnd ? ":59" : ":00");
 }
 
+/** 缓存/结果是否属于当前查询口径。
+    全历史模式要求缓存也是全历史；否则必须 start/end 完全一致。
+    没有这个校验时，换日期后会把上一段时间的总结恢复成「当前结果」。 */
+function scopeMatches(saved, start, end, allTime) {
+  if (!saved) return false;
+  if (allTime) return saved.allTime === true;
+  if (saved.allTime === true) return false;
+  return String(saved.rangeStart || "") === String(start || "") && String(saved.rangeEnd || "") === String(end || "");
+}
+
+/** 统计基线是否属于当前会话与当前时间窗（深挖直接把它当「权威基线」，不能拿旧的凑）。 */
+function statsIsFresh(statsScope, statsRange, sessionId, start, end) {
+  if (!statsScope || statsScope !== sessionId) return false;
+  const r = statsRange || {};
+  return String(r.start || "") === String(start || "") && String(r.end || "") === String(end || "");
+}
+
 /** 成员画像实际查询范围：用 MCP 回显的 time_range（比面板 state 更可信）；
     不限范围时 MCP 返回 null → 「全部历史」。 */
 function memberRangeText(profile) {
@@ -3612,6 +3629,10 @@ function WechatPanel({ api, locale }) {
   // 信息流代次：每次 loadFeed 自增，响应回来时对不上就整批丢弃。
   // 没有它时「A 群慢响应 + 切到 B 群」会把 A 的消息盖到 B 的列表上（新群标题 + 旧群消息）。
   const feedGenRef = useRef(0);
+  // 当前查询作用域的最新值：异步响应回来时用它校验，避免旧会话 / 旧时间窗的请求写进当前状态。
+  const liveScopeRef = useRef({ sessionId: "", rangeStart: "", rangeEnd: "" });
+  // 统计请求代次：连续点「生成统计」或切群时，慢的旧响应不能覆盖新结果。
+  const statsGenRef = useRef(0);
   const [debug, setDebug] = useState("");
   // 操作反馈（如「引用原文不在已加载范围」）：自动淡出，避免一条提示永久占住面板。
   // 技术 dump（MCP 异常等）仍常驻，用户可手动关闭。
@@ -3648,6 +3669,11 @@ function WechatPanel({ api, locale }) {
   const aiUnsubRef = useRef(null);
   const aiPollRef = useRef(null);
   const aiPollStartRef = useRef(0);
+  // 当前 AI 轮询/订阅归属的会话：旧会话的迟到响应必须按它丢弃，
+  // 否则切群后 A 的回复会被写进 B，甚至把 B 提前标成 done。
+  const aiConvRef = useRef("");
+  // 当前 AI 结果对应的查询口径（时间窗）：换日期后不能把旧结论展示成当前结论。
+  const aiScopeRef = useRef({ start: "", end: "" });
   // 当前流式目标：group = 群维度深度分析，member = 单个成员的角色分析
   const aiTargetRef = useRef("group");
   // 成员分析代次：切换/收起成员时自增，让旧请求的后续回调直接作废（避免复活订阅）
@@ -3678,6 +3704,7 @@ function WechatPanel({ api, locale }) {
       clearInterval(aiPollRef.current);
       aiPollRef.current = null;
     }
+    aiConvRef.current = "";
   }, []);
 
   // 停止「成员」这一路的流式读取：群分析在跑时不动它（共用同一个订阅/轮询槽位）
@@ -3766,6 +3793,9 @@ function WechatPanel({ api, locale }) {
   // 查询用时间范围：日期 + 时刻 → MCP 接受的 'YYYY-MM-DD HH:MM:SS'
   const rangeStart = useMemo(() => rangeBound(start, startTime, false), [start, startTime]);
   const rangeEnd = useMemo(() => rangeBound(end, endTime, true), [end, endTime]);
+  // 必须在 rangeStart / rangeEnd 声明之后再写：写在前面会触发 TDZ
+  // （Cannot access 'rangeStart' before initialization），整个面板白屏。
+  liveScopeRef.current = { sessionId: sessionId, rangeStart: rangeStart, rangeEnd: rangeEnd };
 
   // 每小时柱状图的度量：消息条数 / 去重发言人数
   const [hourMetric, setHourMetric] = useState("messages");
@@ -3935,6 +3965,10 @@ function WechatPanel({ api, locale }) {
   const loadOlder = useCallback(async () => {
     if (!sessionId || loadingOlder || !hasMore || keyword.trim()) return;
     setLoadingOlder(true);
+    // 与 loadFeed 同一套代次守卫：切群 / 重新查询后，旧分页响应必须整批丢弃，
+    // 否则会把 A 群的更早消息拼到 B 群列表头部。
+    const gen = feedGenRef.current;
+    const sid = sessionId;
     const box = bodyRef.current;
     const prevHeight = box ? box.scrollHeight : 0;
     try {
@@ -3950,8 +3984,16 @@ function WechatPanel({ api, locale }) {
         }),
       );
       if (!raw.length) {
+        if (gen !== feedGenRef.current || sid !== sessionId) {
+          setLoadingOlder(false);
+          return;
+        }
         setHasMore(false);
       } else {
+        if (gen !== feedGenRef.current || sid !== sessionId) {
+          setLoadingOlder(false);
+          return;
+        }
         const older = raw.slice().reverse(); // asc，拼到列表头部
         setMessages((prev) => older.concat(prev));
         setOlderBatches((n) => n + 1);
@@ -3959,16 +4001,19 @@ function WechatPanel({ api, locale }) {
         const names = Array.from(new Set(older.map((m) => m && m.sender_username).filter(Boolean)));
         if (names.length) {
           fetchAvatarMap(api, names).then((map) => {
+            if (gen !== feedGenRef.current) return;
             if (Object.keys(map).length) setAvatars((p) => Object.assign({}, p, map));
           });
         }
         // 保持视觉位置：把新增内容的高度补偿进 scrollTop
         requestAnimationFrame(() => {
+          if (gen !== feedGenRef.current) return;
           const el = bodyRef.current;
           if (el) el.scrollTop += el.scrollHeight - prevHeight;
         });
       }
     } catch (err) {
+      if (gen !== feedGenRef.current) return;
       setError(errText(err));
     }
     setLoadingOlder(false);
@@ -3978,6 +4023,8 @@ function WechatPanel({ api, locale }) {
      传当前时间窗，与完整统计同口径；会话累计值另由 session.message_count 给出。 ---- */
   const loadQuick = useCallback(async () => {
     if (!sessionId) return;
+    const gen = feedGenRef.current;
+    const scope = { sessionId: sessionId, rangeStart: rangeStart, rangeEnd: rangeEnd };
     setQuickBusy(true);
     try {
       const q = await callTool(api, "get_session_overview", {
@@ -3986,12 +4033,15 @@ function WechatPanel({ api, locale }) {
         end: rangeEnd,
         top_types: 5,
       });
+      const live = liveScopeRef.current;
+      if (gen !== feedGenRef.current) return;
+      if (live.sessionId !== scope.sessionId || live.rangeStart !== scope.rangeStart || live.rangeEnd !== scope.rangeEnd) return;
       if (q && !q.error) setQuick(q);
     } catch (err) {
       // 旧版 MCP（未重启）没有该工具：静默跳过，完整统计仍然可用
       log(api, "get_session_overview 不可用：" + errText(err));
     }
-    setQuickBusy(false);
+    if (gen === feedGenRef.current) setQuickBusy(false);
   }, [api, sessionId, rangeStart, rangeEnd]);
 
   /* ---- 增量刷新：只拉「当前最后一条之后」的新消息，避免整页重查 ---- */
@@ -4003,6 +4053,9 @@ function WechatPanel({ api, locale }) {
       return;
     }
     setLoadingNewer(true);
+    // 与 loadFeed / loadOlder 同一套代次守卫：切群后旧响应不能追加到新群列表。
+    const gen = feedGenRef.current;
+    const sid = sessionId;
     try {
       const last = messages[messages.length - 1];
       if (!last || last.id === undefined) {
@@ -4013,6 +4066,10 @@ function WechatPanel({ api, locale }) {
           session_id: sessionId,
           limit: 200,
         });
+        if (gen !== feedGenRef.current || sid !== sessionId) {
+          setLoadingNewer(false);
+          return;
+        }
         const rows = asArray(res);
         // 只并入仍在当前时间窗内的消息：范围查询下「新消息」可能已落在窗口之外
         const fresh = rows.filter(
@@ -4029,6 +4086,7 @@ function WechatPanel({ api, locale }) {
           const names = Array.from(new Set(add.map((m) => m && m.sender_username).filter(Boolean)));
           if (names.length) {
             fetchAvatarMap(api, names).then((map) => {
+              if (gen !== feedGenRef.current) return;
               if (Object.keys(map).length) setAvatars((prev) => Object.assign({}, prev, map));
             });
           }
@@ -4042,6 +4100,10 @@ function WechatPanel({ api, locale }) {
         );
       }
     } catch (err) {
+      if (gen !== feedGenRef.current) {
+        setLoadingNewer(false);
+        return;
+      }
       setError(errText(err));
     }
     setLoadingNewer(false);
@@ -4110,7 +4172,8 @@ function WechatPanel({ api, locale }) {
       /* 订阅已失效 */
     }
     aiUnsubRef.current = null;
-    // 信息流：旧群消息立刻消失（新群的 loadFeed 会重新填），否则会短暂看到「新群标题 + 旧群消息」
+    aiScopeRef.current = { start: "", end: "" };
+    statsGenRef.current += 1;
     setMessages([]);
     // 无新群可查（重置为未选群）时，没有 loadFeed 去顶替在途请求，这里补一次代次让它作废；
     // 有新群时**不能**自增 —— 同一轮 effect 里新群的 loadFeed 已先自增过，再自增会把它自己的响应也丢掉
@@ -4181,6 +4244,8 @@ function WechatPanel({ api, locale }) {
       }
       const startArg = (override && override.start) || rangeStart;
       const endArg = (override && override.end) || rangeEnd;
+      const gen = ++statsGenRef.current;
+      const sid = sessionId;
       setLoading(true);
       setError("");
       setCreated(null);
@@ -4204,9 +4269,12 @@ function WechatPanel({ api, locale }) {
             end: endArg,
           });
         }
+        const live = liveScopeRef.current;
+        if (gen !== statsGenRef.current) return;
+        if (live.sessionId !== sid || live.rangeStart !== startArg || live.rangeEnd !== endArg) return;
         setStats(s && typeof s === "object" ? s : null);
         setStatsRange({ start: startArg, end: endArg });
-        setStatsScope(sessionId);
+        setStatsScope(sid);
         // 语义类指标（话题/关键词/待办）交给「AI 深度分析」，本地不再拉样本算词频。
         // 活跃发言者头像：top_senders 已带 username，批量取一次（缺失静默回退色块）
         const topNames = ((s && s.top_senders) || []).map((x) => x && x.username).filter(Boolean);
@@ -4216,10 +4284,11 @@ function WechatPanel({ api, locale }) {
           });
         }
       } catch (err) {
+        if (gen !== statsGenRef.current) return;
         setStats(null);
         setError(errText(err));
       }
-      setLoading(false);
+      if (gen === statsGenRef.current) setLoading(false);
     },
     [api, sessionId, rangeStart, rangeEnd, t.pick],
   );
@@ -4270,7 +4339,7 @@ function WechatPanel({ api, locale }) {
             // 旧版（v0.32.17 及以前）可能在「开场白被当成成稿」时落盘了无效缓存：
             // 没有结构化数据、正文又很短 —— 忽略它，否则重开面板只会看到一句「别催」。
             const savedUsable = !!(saved && saved.data) || savedText.length >= 200;
-            if (saved && savedText && savedUsable && !!saved.allTime === allTime) {
+            if (saved && savedText && savedUsable && scopeMatches(saved, rangeStart, rangeEnd, allTime)) {
               setMemberAiText(savedText);
               setMemberAiData(saved.data || null);
               setMemberAiStatus("done");
@@ -4455,13 +4524,15 @@ function WechatPanel({ api, locale }) {
           text: memberAiText,
           data: memberAiData || null,
           allTime: memberAllTime,
+          rangeStart: memberAllTime ? "" : rangeStart,
+          rangeEnd: memberAllTime ? "" : rangeEnd,
           at: Date.now(),
         });
       }
     } catch (err) {
       /* 存不进去不影响展示 */
     }
-  }, [api, sessionId, memberProfile, memberAiStatus, memberAiText, memberAiData, memberAllTime]);
+  }, [api, sessionId, memberProfile, memberAiStatus, memberAiText, memberAiData, memberAllTime, rangeStart, rangeEnd]);
 
   // 点击成员榜 / 查找结果后画像在下方较远处：等它渲染完成再滚过去，省掉用户手动翻找
   useEffect(() => {
@@ -4481,8 +4552,11 @@ function WechatPanel({ api, locale }) {
       .then(() => (api.storage && api.storage.getJson ? api.storage.getJson(summaryKey(sessionId)) : null))
       .then((saved) => {
         if (!alive || !saved || !saved.text) return;
+        // 缓存必须属于当前会话 + 当前时间窗：否则换日期后会把上一段时间的总结当成当前结果。
+        if (!scopeMatches(saved, rangeStart, rangeEnd, false)) return;
         // 同成员分析：没有结构化数据又很短 = 旧版误收口的开场白，不回填
         if (!saved.data && String(saved.text).length < 200) return;
+        aiScopeRef.current = { start: rangeStart, end: rangeEnd };
         setAiText((prev) => prev || saved.text);
         setAiData((prev) => prev || saved.data || null);
         setAiStatus((prev) => (prev === "streaming" ? prev : "done"));
@@ -4491,7 +4565,22 @@ function WechatPanel({ api, locale }) {
     return () => {
       alive = false;
     };
-  }, [api, sessionId, summaryKey]);
+  }, [api, sessionId, summaryKey, rangeStart, rangeEnd]);
+
+  // 时间窗变化后，当前展示的 AI 结论若属于旧窗口就清掉（不参与渲染，也不进导出报告）。
+  // 正在流式或忙碌时不动它 —— 那一轮结束会以新口径收口或由用户中止。
+  useEffect(() => {
+    if (!sessionId) return;
+    const scope = aiScopeRef.current;
+    if (!scope.start && !scope.end) return;
+    if (aiStatus === "streaming" || aiBusy || deepBusy) return;
+    if (scope.start === rangeStart && scope.end === rangeEnd) return;
+    aiScopeRef.current = { start: "", end: "" };
+    setAiText("");
+    setAiData(null);
+    setAiStatus("");
+    setSaveMsg("");
+  }, [sessionId, rangeStart, rangeEnd, aiStatus, aiBusy, deepBusy]);
 
   /* ---- AI 深度分析：面板内流式渲染 ----
      两条数据通道：messages 域订阅（实时）+ 2s 轮询兜底。
@@ -4543,8 +4632,10 @@ function WechatPanel({ api, locale }) {
     (convId) => {
       stopPoll();
       if (!convId) return;
+      aiConvRef.current = convId;
       aiPollStartRef.current = Date.now();
       aiPollRef.current = setInterval(async () => {
+        if (convId !== aiConvRef.current) return;
         // 超时保护：极端情况下（模型没按约定输出 json）也要收敛，不能无限轮询
         if (Date.now() - aiPollStartRef.current > AI_POLL_TIMEOUT_MS) {
           setTargetAiStatus("done");
@@ -4554,6 +4645,8 @@ function WechatPanel({ api, locale }) {
         }
         try {
           const resp = await api.metadata.get("messages", { params: { conversationId: convId } });
+          // 请求返回时可能已经切群/换了会话：旧结果一律丢弃。
+          if (convId !== aiConvRef.current) return;
           // 权限被拒时绝不能无声地等满 10 分钟超时：把原因直接甩到面板上。
           // 常见成因：plugin.json 的 privacy.scopes 里没声明 "messages"，
           // 或声明了但 app 的插件注册记录还是旧版（需要 rescan / 重装才会重读）。
@@ -4591,6 +4684,7 @@ function WechatPanel({ api, locale }) {
         const sub = await api.metadata.subscribe(
           "messages",
           (payload) => {
+            if (convId !== aiConvRef.current) return;
             const data = (payload && payload.domains && payload.domains.messages) || payload;
             if (applyAiPayload(data)) {
               try {
@@ -4604,6 +4698,16 @@ function WechatPanel({ api, locale }) {
           },
           { params: { conversationId: convId } },
         );
+        if (convId !== aiConvRef.current) {
+          // 订阅建立期间已经切走：立刻退订，且不要启动新的轮询
+          try {
+            if (typeof sub === "function") sub();
+            else if (sub && sub.unsubscribe) sub.unsubscribe();
+          } catch (err) {
+            /* 已失效 */
+          }
+          return;
+        }
         aiUnsubRef.current = typeof sub === "function" ? sub : (sub && sub.unsubscribe) || null;
         subscribed = true;
       } catch (err) {
@@ -4632,6 +4736,7 @@ function WechatPanel({ api, locale }) {
       return;
     }
     aiTargetRef.current = "group";
+    aiScopeRef.current = { start: rangeStart, end: rangeEnd };
     setAiBusy(true);
     setError("");
     setCreated(null);
@@ -4813,7 +4918,9 @@ function WechatPanel({ api, locale }) {
     // 4 段 + 7 视角 + 7 验证 = 19 个子代理，日报被当成月报处理。
     const days = rangeDaysOf(rangeStart, rangeEnd);
     const lenses = activeDeepLenses(aiSettings.dims, days);
-    const segs = planDeepSegments(rangeStart, rangeEnd, stats, aiSettings.deep.segments);
+    // 统计基线必须属于当前会话 + 当前时间窗；否则宁可不带基线，也不能把旧数据当「权威对账依据」。
+    const statsForDeep = statsIsFresh(statsScope, statsRange, sessionId, rangeStart, rangeEnd) ? stats : null;
+    const segs = planDeepSegments(rangeStart, rangeEnd, statsForDeep, aiSettings.deep.segments);
     const verifyK = aiSettings.deep.verify;
     const verifyWidth = deepVerifyWidth(days);
     const gen = ++deepGenRef.current;
@@ -4834,7 +4941,7 @@ function WechatPanel({ api, locale }) {
     setDeepOpenStep("");
 
     const groupName = (current && current.display_name) || sessionId;
-    const statsBrief = buildStatsBrief(stats, current, sessionId, rangeStart, rangeEnd);
+    const statsBrief = buildStatsBrief(statsForDeep, current, sessionId, rangeStart, rangeEnd);
     const base = {
       sessionName: groupName,
       sessionId: sessionId,
@@ -4844,6 +4951,8 @@ function WechatPanel({ api, locale }) {
     };
     const titleOf = (label) => "深挖·" + label + "：" + groupName + " " + rangeStart.slice(0, 10) + "~" + rangeEnd.slice(0, 10);
 
+    // 超时收口的阶段：最终状态必须区分「完成」与「部分完成」，不能把半截输入说成全部收口。
+    const partialStages = [];
     const runPhase = async (id, text) => {
       const step = plan.filter((s) => s.id === id)[0];
       patchDeepStep(id, { status: "running" });
@@ -4863,6 +4972,7 @@ function WechatPanel({ api, locale }) {
         chars: String(r.text || "").length,
         marks: readProgressMarks(r.text),
       });
+      if (r.incomplete) partialStages.push(step.label);
       return r;
     };
 
@@ -4878,7 +4988,8 @@ function WechatPanel({ api, locale }) {
       const lensText = clipForStage(s2.text, DEEP_CLIP.verifyPrev);
       // 阶段 3：对抗式交叉验证（用基线对账 + 回原文取证）
       let verified = lensText;
-      if (verifyK > 0) {
+      // 视角阶段超时：拿半截结论去「审查」只会制造伪验证，直接跳过验证，由最终阶段明确降级。
+      if (verifyK > 0 && !s2.incomplete) {
         const s3 = await runPhase(
           "verify",
           deepVerifyPrompt(
@@ -4892,6 +5003,11 @@ function WechatPanel({ api, locale }) {
           ),
         );
         verified = lensText + "\n\n===== 审查意见（用于修正与删除无据结论） =====\n\n" + String(s3.text || "");
+      } else if (verifyK > 0 && s2.incomplete) {
+        patchDeepStep("verify", {
+          status: "cancelled",
+          text: "视角阶段超时收口，已跳过交叉验证（避免对半截结论做伪验证）。",
+        });
       }
       // 阶段 4：汇总成稿（沿用既有 JSON schema，图表与报告零改动复用）
       const s4 = await runPhase(
@@ -4907,7 +5023,15 @@ function WechatPanel({ api, locale }) {
       );
       setDeepText(stripJsonBlock(s4.text));
       setDeepData(parseAiData(s4.text));
-      setDeepMsg("深挖完成：" + plan.length + " 个阶段已收口，结果已并入下方「完整报告」的 AI 章节。");
+      if (partialStages.length) {
+        // 有阶段超时收口：不能说「全部完成」—— 汇总可能建立在半截事实或未完成的验证上。
+        setDeepMsg(
+          "深挖部分完成：" + plan.length + " 个阶段已执行；超时收口：" + partialStages.join("、") +
+            "（该阶段输入可能不完整）。结果已并入下方「完整报告」的 AI 章节，建议核对后再使用。",
+        );
+      } else {
+        setDeepMsg("深挖完成：" + plan.length + " 个阶段已收口，结果已并入下方「完整报告」的 AI 章节。");
+      }
     } catch (err) {
       const why = errText(err);
       if (why === "已中止") {
@@ -4918,7 +5042,7 @@ function WechatPanel({ api, locale }) {
       }
     }
     if (deepGenRef.current === gen) setDeepBusy(false);
-  }, [api, sessionId, rangeStart, rangeEnd, stats, current, aiSettings, aiBusy, aiStatus, deepBusy, runOneTurn, patchDeepStep, t.pick]);
+  }, [api, sessionId, rangeStart, rangeEnd, stats, statsScope, statsRange, current, aiSettings, aiBusy, aiStatus, deepBusy, runOneTurn, patchDeepStep, t.pick]);
 
   /* ---- 角色维度：单个成员的近期发言分析（复用同一条流式管线，目标 = member） ---- */
   const memberPrompt = useCallback(
@@ -5217,10 +5341,10 @@ function WechatPanel({ api, locale }) {
     const from = new Date(String(rangeStart || "").replace(" ", "T"));
     const to = new Date(String(rangeEnd || "").replace(" ", "T"));
     const hours = !isNaN(from.getTime()) && !isNaN(to.getTime()) ? Math.max(0, (to.getTime() - from.getTime()) / 3600000) : 0;
-    const msgs = Number(stats && stats.total_messages) || 0;
     const days = rangeDaysOf(rangeStart, rangeEnd);
+    const msgs = Number(statsIsFresh(statsScope, statsRange, sessionId, rangeStart, rangeEnd) && stats && stats.total_messages) || 0;
     const lenses = activeDeepLenses(aiSettings.dims, days).length;
-    const segs = planDeepSegments(rangeStart, rangeEnd, stats, aiSettings.deep.segments).length;
+    const segs = planDeepSegments(rangeStart, rangeEnd, statsIsFresh(statsScope, statsRange, sessionId, rangeStart, rangeEnd) ? stats : null, aiSettings.deep.segments).length;
     const verifyK = aiSettings.deep.verify;
     const verifyWidth = deepVerifyWidth(days);
     // 日报是 00:00:00 ~ 23:59:59（23.9999 小时），阈值取 23 才不会把「整天」误判成短时段
@@ -5229,7 +5353,7 @@ function WechatPanel({ api, locale }) {
     // 子代理数：阶段 1 只有分段时才派（日级不分段、自己读）；阶段 2 派 lenses 个；阶段 3 派 verifyWidth 个
     const subAgents = (segs > 1 ? segs : 0) + lenses + (verifyK > 0 ? verifyWidth : 0);
     return { hours: hours, msgs: msgs, lenses: lenses, segs: segs, verifyK: verifyK, verifyWidth: verifyWidth, days: days, recommend: recommend, stages: stages, subAgents: subAgents };
-  }, [rangeStart, rangeEnd, stats, aiSettings]);
+  }, [rangeStart, rangeEnd, stats, statsScope, statsRange, sessionId, aiSettings]);
 
   // 结果槽：按当前档位优先，缺则回退另一档 —— 界面与报告同源，避免「看到 A 却报告写 B」
   const shownAiText = stripAiJson(deepMode === "deep" ? deepText || aiText : aiText || deepText);

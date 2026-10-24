@@ -3,6 +3,31 @@
 > 本文件由原 README 的「演进摘要」按版本拆分而来，保留全部原始记录，仅做分段与标题整理。
 > 每个版本的发布资产见 [Releases](https://github.com/ShiroEirin/snow-wechat-panel/releases)。
 
+## v0.32.26
+
+**过期请求与结果口径收口（数据正确性，无 UI 改版）。** 起因是一次复审：测试全绿但问题都在 Promise 返回顺序里。这一版只修「会让用户看到错误数据」的路径，不加新功能。
+
+① **信息流分页补代次守卫** —— `loadOlder` / `loadNewer` 此前没有 generation 校验（只有首屏 `loadFeed` 有）：A 群点「加载更早」后立刻切到 B 群，A 的慢响应会执行 `older.concat(prev)`，把 A 的旧消息拼到 B 的列表头部；「刷新新消息」同理。现在两者都在发起时捕获 `feedGenRef + sessionId`，响应、异常、头像回填与滚动补偿前统一校验，加载态也不会被旧请求提前清掉。
+
+② **轻量概览 / 完整统计补代次与口径守卫** —— `loadQuick` / `loadStats` 没有 generation：旧群或旧时间窗的慢响应会覆盖新结果，并写入旧的 `statsScope/statsRange`。现在分别用 `feedGenRef` 与新增的 `statsGenRef` + `liveScopeRef`（当前 session + 时间窗）校验，只有仍然匹配当前口径才落地。切群时同时递增 `statsGenRef`，让在途统计作废。
+
+③ **深挖不再把旧统计当「权威基线」** —— 以前 `runDeep` 直接使用当前 `stats`，即使它属于别的群 / 别的时间窗；提示词却把它标成「权威，不得与之矛盾」。现在 `statsIsFresh()` 判定不匹配时传 `null`，退回「未加载统计基线」文案；成本预估也使用同一判定，不再按旧消息量推荐档位。
+
+④ **总结缓存绑定完整口径** —— 群总结缓存虽然保存了 `rangeStart/rangeEnd`，恢复时却从不比较；成员总结只比较 `allTime`，非全历史时不记录具体范围。结果：10 月 1 日生成的总结，切到 10 月 2 日后仍会被恢复成 `done` 并并入当前报告；成员画像同理。现在：
+   - `scopeMatches(saved, start, end, allTime)` 统一校验；
+   - 恢复时口径不符直接忽略（旧缓存没有范围字段也视为不符）；
+   - 成员缓存补齐 `rangeStart/rangeEnd`；
+   - 时间窗切换后，当前展示的旧 AI 结论会被清空，不参与渲染与导出（流式中不动它，等本轮收口再判定）。
+
+⑤ **AI 轮询 / 订阅按会话隔离** —— 新增 `aiConvRef`：`startPoll` 记录当前会话，轮询 tick、`metadata.get` 返回、实时订阅回调、以及「订阅建立期间已切走」都要校验 `convId`，晚到的订阅立即退订。此前切群后 A 的迟到响应会按当前 `aiTargetRef` 写进 B，甚至把 B 提前标成 `done`、停掉 B 的轮询。
+
+⑥ **深挖「部分完成」不再谎报全部收口** —— 阶段超时只把该步骤标成 `partial`，后续阶段继续跑，最终仍无条件提示「N 个阶段已收口」。现在：
+   - 累计 `partialStages`，最终提示区分「深挖完成」与「深挖部分完成」，并列出超时的阶段；
+   - 视角阶段超时则**跳过交叉验证**（对半截结论做审查只会制造伪验证），验证步骤标为 `cancelled` 并说明原因；
+   - 汇总阶段超时也计入部分完成。
+
+测试 97 → **106 passed**（新增 9 条：`scopeMatches` 的范围/全历史/旧缓存边界，`statsIsFresh` 的同群同范围/跨群/范围不符/无作用域）。
+
 ## v0.32.25
 
 **深挖流水线按跨度缩放（修「日报被当月报跑」+ 修宿主渲染栈溢出）。** 起因是一次日报深挖跑到第③阶段时整个界面白屏，日志里只有两条 `RangeError: Maximum call stack size exceeded`（`renderer/AppErrorBoundary`，组件栈全在宿主自己的 `ChatInputToolbar`），而报错时刻恰好是「交叉验证」会话创建后 34 秒。

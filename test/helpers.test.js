@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -311,6 +311,33 @@ const clipped = lib.clipForStage(longText, 1000);
 ok("超限时裁到上限附近", clipped.length < 1300);
 ok("裁剪后带省略标记", clipped.indexOf("中间省略") >= 0);
 ok("裁剪后保留尾部", clipped.indexOf("B".repeat(50)) >= 0);
+
+console.log("scopeMatches / statsIsFresh（口径守卫）");
+// 回归：换日期后不能把上一段时间的总结恢复成「当前结果」；
+// 深挖也不能把旧群/旧时间窗的统计当成「权威基线」。
+const s1 = { rangeStart: "2026-10-01 00:00:00", rangeEnd: "2026-10-01 23:59:59" };
+ok("范围完全一致才算匹配", lib.scopeMatches(s1, s1.rangeStart, s1.rangeEnd, false) === true);
+ok("结束时间不同即不匹配", lib.scopeMatches(s1, s1.rangeStart, "2026-10-02 23:59:59", false) === false);
+ok("全历史缓存不能当范围结果", lib.scopeMatches({ allTime: true }, "", "", false) === false);
+ok("全历史模式只认全历史缓存", lib.scopeMatches({ allTime: true }, "x", "y", true) === true);
+ok("旧缓存缺范围时视为不匹配", lib.scopeMatches({ text: "old" }, s1.rangeStart, s1.rangeEnd, false) === false);
+
+ok(
+  "统计同群同范围才算新鲜",
+  lib.statsIsFresh("room-a", { start: "a", end: "b" }, "room-a", "a", "b") === true,
+);
+ok("统计跨群不新鲜", lib.statsIsFresh("room-a", { start: "a", end: "b" }, "room-b", "a", "b") === false);
+ok("统计范围不符不新鲜", lib.statsIsFresh("room-a", { start: "a", end: "b" }, "room-a", "a", "c") === false);
+ok("没有统计作用域时不新鲜", lib.statsIsFresh("", { start: "", end: "" }, "room-a", "", "") === false);
+
+console.log("面板初始化顺序");
+// 回归：v0.32.26 曾把 liveScopeRef.current 的赋值写在 rangeStart 声明之前，
+// 运行时抛 Cannot access 'rangeStart' before initialization，整块面板白屏。
+// node --check 只查语法，抓不到 TDZ，所以这里用源码位置固定顺序。
+const liveAssignAt = src.indexOf("liveScopeRef.current = { sessionId");
+const rangeDeclAt = src.indexOf("const rangeStart = useMemo");
+ok("rangeStart 有声明", rangeDeclAt > 0);
+ok("liveScopeRef 赋值在 rangeStart 声明之后", liveAssignAt > rangeDeclAt && liveAssignAt > 0);
 
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);
