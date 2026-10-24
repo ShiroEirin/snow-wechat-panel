@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -338,6 +338,102 @@ const liveAssignAt = src.indexOf("liveScopeRef.current = { sessionId");
 const rangeDeclAt = src.indexOf("const rangeStart = useMemo");
 ok("rangeStart 有声明", rangeDeclAt > 0);
 ok("liveScopeRef 赋值在 rangeStart 声明之后", liveAssignAt > rangeDeclAt && liveAssignAt > 0);
+
+// v0.32.27 曾让 runEditorial/saveIssue 的依赖数组直接引用声明在后面（6243+）的
+// shownAiText / periodLabel，初始化阶段就抛 Cannot access 'shownAiText' before initialization。
+const reStart = src.indexOf("const runEditorial =");
+const reEnd = src.indexOf("const memberPrompt", reStart);
+const issueBlock = src.slice(reStart, reEnd);
+ok("画报回调不直接引用后置变量", issueBlock.indexOf("shownAiText") < 0 && issueBlock.indexOf("shownAiData") < 0 && issueBlock.indexOf("periodLabel: periodLabel") < 0);
+const issueAssignAt = src.indexOf("issueCtxRef.current = {");
+const shownDeclAt = src.indexOf("const shownAiText");
+const periodDeclAt = src.indexOf("const periodLabel = useMemo");
+ok("issueCtxRef 在后置变量声明之后赋值", issueAssignAt > shownDeclAt && issueAssignAt > periodDeclAt && issueAssignAt > 0);
+
+console.log("画报 · 编辑部分析与模板");
+const issueStats = {
+  total_messages: 1234,
+  unique_senders: 42,
+  hourly_distribution: { "09": 5, "10": 12, "21": 3 },
+  top_phrases: [{ phrase: "炼丹", count: 9 }],
+  member_rank: [
+    { display_name: "小王", username: "u1", messages: 20 },
+    { display_name: "小李", username: "u2", messages: 12 },
+  ],
+  highlights: [{ text: "原话一条", sender_name: "小王", time: "2026-10-20 10:05:00" }],
+  system_events: { recall_rate: 0.0125 },
+};
+const issueMetrics = lib.editorialMetrics(issueStats);
+ok("画报指标：总量/人数", issueMetrics.total === 1234 && issueMetrics.senders === 42);
+ok("画报指标：峰值小时", issueMetrics.peakHour === "10" && issueMetrics.peakCount === 12);
+ok("画报指标：热词与撤回率", issueMetrics.topPhrase === "炼丹" && issueMetrics.recallRate === "1.3%");
+
+const headLines = lib.issueHeadlineLines("一群人，把深夜调成了工作台", 11.5);
+ok("标题按词分行且不丢字", headLines.join("") === "一群人，把深夜调成了工作台");
+ok("标题不出现单字掉行", headLines.length === 2 && headLines[1] !== "台");
+const longLines = lib.issueHeadlineLines("这一条特别长的标题用来确认分行不会把词拆开也不会超过四行", 11.5);
+ok("超长标题最多四行", longLines.length <= 4 && longLines.length >= 2);
+
+const fallbackIssue = lib.normalizeEditorial(null, {
+  stats: issueStats,
+  title: "测试群",
+  rangeLabel: "2026-10-20 ~ 2026-10-20",
+  periodLabel: "日报",
+  avatarMap: {},
+});
+ok("无 AI 时仍能出头条", fallbackIssue.headline.indexOf("测试群") >= 0);
+ok("无 AI 时小节不为空", fallbackIssue.sections.length >= 1);
+ok("无 AI 时人物来自成员榜", fallbackIssue.characters.length === 2 && fallbackIssue.characters[0].name === "小王");
+ok("无 AI 时时间线来自峰值", fallbackIssue.timeline.length >= 1 && fallbackIssue.timeline[0].time === "10:00");
+ok("无 AI 时金句来自 highlights", fallbackIssue.quotes.length === 1 && fallbackIssue.quotes[0].text === "原话一条");
+
+const promptText = lib.editorialPrompt({
+  sessionName: "测试群",
+  rangeStart: "2026-10-20 00:00:00",
+  rangeEnd: "2026-10-20 23:59:59",
+  statsBrief: "消息总量：1234",
+  prevText: "已有结论",
+});
+ok("编辑部分析提示词含契约字段", promptText.indexOf('"headline"') >= 0 && promptText.indexOf('"characters"') >= 0);
+ok("编辑部分析提示词带统计基线", promptText.indexOf("消息总量：1234") >= 0);
+
+const artHtml = lib.buildArtIssueHtml({
+  aiData: {
+    kicker: "群像志",
+    headline: "<script>alert(1)</script>",
+    deck: "副标题",
+    lead: "导语",
+    sections: [{ title: "一节", body: "正文", pull_quote: "拉引" }],
+    characters: [{ name: "小王", role: "水群王", quote: "原话" }],
+    timeline: [{ time: "10:00", event: "峰值" }],
+    quotes: [{ text: "金句", who: "小王", time: "10:05" }],
+    closing: "下期见",
+  },
+  stats: issueStats,
+  title: "测试群",
+  rangeLabel: "2026-10-20 ~ 2026-10-20",
+  periodLabel: "日报",
+  skin: "noir",
+  generatedAt: "2026-10-20 23:00",
+});
+ok("艺术画报是完整 HTML", artHtml.indexOf("<!doctype html>") === 0 && artHtml.indexOf("</html>") > 0);
+ok("艺术画报带皮肤与动效", artHtml.indexOf('data-skin="noir"') >= 0 && artHtml.indexOf("IntersectionObserver") >= 0);
+ok("艺术画报转义脚本注入", artHtml.indexOf("<script>alert(1)</script>") < 0 && artHtml.indexOf("&lt;script&gt;") >= 0);
+ok("艺术画报无外链资源", artHtml.indexOf('src="http') < 0 && artHtml.indexOf("<link") < 0);
+
+const paperHtml = lib.buildNewspaperHtml({
+  aiData: fallbackIssue,
+  stats: issueStats,
+  title: "测试群",
+  rangeLabel: "2026-10-20 ~ 2026-10-20",
+  periodLabel: "日报",
+  variant: "extra",
+  generatedAt: "2026-10-20 23:00",
+});
+ok("报纸画报是完整 HTML", paperHtml.indexOf("<!doctype html>") === 0 && paperHtml.indexOf("</html>") > 0);
+ok("报纸画报带版式与打印样式", paperHtml.indexOf('data-variant="extra"') >= 0 && paperHtml.indexOf("@media print") >= 0);
+ok("报纸画报包含分栏与首字下沉", paperHtml.indexOf("columns:3") >= 0 && paperHtml.indexOf("first-letter") >= 0);
+ok("报纸画报无外链资源", paperHtml.indexOf('src="http') < 0 && paperHtml.indexOf("<link") < 0);
 
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);

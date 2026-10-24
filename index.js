@@ -2919,11 +2919,669 @@ function buildMemberHtml(opts) {
   );
 }
 
+/* ============================ 画报 · 编辑部 ============================
+   两类输出共用一份「编辑部分析」JSON：
+     - 艺术画报（Art Issue）：全屏滚动叙事、暗色电影感、动效
+     - 报纸画报（Broadsheet）：报头 / 分栏 / 首字下沉 / 可打印
+   面板数据是分析型 schema，缺头条 / 导语 / 拉引这些「版面语言」，所以单独跑一轮
+   编辑部分析；模型不可用时 normalizeEditorial 会用 stats + 现有 AI 结论降级拼版面。 */
+
+function editorialTxt(v) {
+  return v === undefined || v === null ? "" : String(v).trim();
+}
+
+function editorialArr(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+/** 版面要用的统计指标（两套画报共用，避免各自算一套口径） */
+function editorialMetrics(stats) {
+  const s = stats && typeof stats === "object" ? stats : {};
+  const total = Number(s.total_messages) || 0;
+  const senders = Number(s.unique_senders) || 0;
+  const hourly = s.hourly_distribution && typeof s.hourly_distribution === "object" ? s.hourly_distribution : {};
+  let peakHour = "";
+  let peak = 0;
+  Object.keys(hourly).forEach((k) => {
+    const n = Number(hourly[k]) || 0;
+    if (n > peak) {
+      peak = n;
+      peakHour = k;
+    }
+  });
+  const phrases = editorialArr(s.top_phrases);
+  const topPhrase = phrases.length ? editorialTxt(phrases[0].phrase) : "";
+  const sys = s.system_events && typeof s.system_events === "object" ? s.system_events : {};
+  const recallRate = Number(sys.recall_rate);
+  return {
+    total: total,
+    senders: senders,
+    perCapita: senders ? (total / senders).toFixed(1) : "0",
+    peakHour: peakHour,
+    peakCount: peak,
+    topPhrase: topPhrase,
+    recallRate: Number.isFinite(recallRate) ? (recallRate * 100).toFixed(1) + "%" : "",
+  };
+}
+
+/** 把中文标题按「词」切成平衡的几行，避免把「深夜」拆成两行或只剩一个字掉行。
+    Intl.Segmenter 可用时按词切；不可用时逐字切。cap 是每行的视觉字宽。 */
+function issueHeadlineLines(text, cap) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return [];
+  let segs;
+  try {
+    const seg = new Intl.Segmenter("zh", { granularity: "word" });
+    segs = Array.from(seg.segment(raw), (x) => x.segment);
+  } catch (err) {
+    segs = Array.from(raw);
+  }
+  const weightOf = (s) => Array.from(String(s || "")).reduce((a, ch) => a + (/[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch) ? 1 : 0.55), 0);
+  const total = segs.reduce((a, s) => a + weightOf(s), 0);
+  const n = Math.max(1, Math.ceil(total / (Number(cap) || 10)));
+  const target = total / n;
+  const threshold = target * 1.1;
+  const lines = [];
+  let cur = "";
+  let w = 0;
+  segs.forEach((s) => {
+    const sw = weightOf(s);
+    if (cur && w + sw > threshold) {
+      lines.push(cur.trim());
+      cur = s;
+      w = sw;
+    } else {
+      cur += s;
+      w += sw;
+    }
+  });
+  if (cur.trim()) lines.push(cur.trim());
+  return lines.filter(Boolean).slice(0, 4);
+}
+
+/** 把编辑部分析结果 + 统计基线归一成两套模板都能吃的版面数据。
+    所有字段都可缺失：缺了就降级，绝不因为模型少写一段而空白。 */
+function normalizeEditorial(ai, ctx) {
+  const o = ctx || {};
+  const a = ai && typeof ai === "object" ? ai : {};
+  const stats = o.stats && typeof o.stats === "object" ? o.stats : {};
+  const metrics = editorialMetrics(stats);
+  const rank = editorialArr(stats.member_rank).length
+    ? editorialArr(stats.member_rank)
+    : editorialArr(stats.top_senders);
+  const nameOf = (m) => editorialTxt(m && (m.display_name || m.name || m.sender || m.u || m.username));
+  const countOf = (m) => Number(m && (m.messages != null ? m.messages : m.count)) || 0;
+  const faceOf = (name) => {
+    const hit = rank.filter((m) => nameOf(m) === name)[0];
+    const key = hit && (hit.username || hit.u);
+    const src = key && o.avatarMap ? o.avatarMap[key] : "";
+    return src ? editorialTxt(src) : "";
+  };
+
+  const title = editorialTxt(o.title) || "群聊画报";
+  const rangeLabel = editorialTxt(o.rangeLabel);
+  const periodLabel = editorialTxt(o.periodLabel);
+
+  const headline = editorialTxt(a.headline) || editorialTxt(a.summary) || title + "的这一天";
+  const deck = editorialTxt(a.deck) || editorialTxt(a.subtitle) || "";
+  const lead =
+    editorialTxt(a.lead) ||
+    editorialTxt(a.summary) ||
+    "这段时间的讨论、人物与情绪，被收进这一份画报里。";
+
+  let sections = editorialArr(a.sections)
+    .map((x) => ({
+      title: editorialTxt(x && (x.title || x.heading || x.name)),
+      body: editorialTxt(x && (x.body || x.text || x.desc)),
+      quote: editorialTxt(x && (x.pull_quote || x.pullQuote || x.quote)),
+      statValue: editorialTxt(x && x.stat && x.stat.value),
+      statLabel: editorialTxt(x && x.stat && x.stat.label),
+    }))
+    .filter((x) => x.title || x.body);
+
+  if (!sections.length) {
+    const points = editorialArr(a.key_points).length ? editorialArr(a.key_points) : editorialArr(a.topics);
+    sections = points.slice(0, 5).map((x, i) => ({
+      title:
+        editorialTxt(x && (x.title || x.name)) ||
+        (i === 0 ? "这段时间发生了什么" : "切片 " + (i + 1)),
+      body:
+        editorialTxt(x && (x.body || x.text || x.desc)) ||
+        (editorialArr(x && x.keywords).length ? editorialArr(x.keywords).join(" · ") : editorialTxt(x)),
+      quote: editorialTxt(x && x.quote),
+      statValue: "",
+      statLabel: "",
+    }));
+  }
+  if (!sections.length) {
+    sections = [{ title: "本段时间", body: lead, quote: "", statValue: "", statLabel: "" }];
+  }
+
+  let characters = editorialArr(a.characters)
+    .map((x) => ({
+      name: editorialTxt(x && (x.name || x.who)),
+      role: editorialTxt(x && (x.role || x.title || x.tag)),
+      quote: editorialTxt(x && (x.quote || x.line)),
+      note: editorialTxt(x && (x.note || x.desc)),
+      face: "",
+    }))
+    .filter((x) => x.name);
+  if (!characters.length) {
+    characters = rank.slice(0, 6).map((m, i) => ({
+      name: nameOf(m) || "群友 " + (i + 1),
+      role: countOf(m) ? "发言 " + countOf(m) + " 条" : "群成员",
+      quote: "",
+      note: "",
+      face: "",
+    }));
+  }
+  characters = characters.slice(0, 8).map((x) => Object.assign({}, x, { face: faceOf(x.name) }));
+
+  let timeline = editorialArr(a.timeline)
+    .map((x) => ({
+      time: editorialTxt(x && (x.time || x.when)),
+      event: editorialTxt(x && (x.event || x.title || x.text)),
+      note: editorialTxt(x && (x.note || x.desc)),
+    }))
+    .filter((x) => x.time || x.event);
+  if (!timeline.length && metrics.peakHour !== "") {
+    timeline = [{ time: metrics.peakHour + ":00", event: "消息峰值 " + metrics.peakCount + " 条" }];
+  }
+
+  let quotes = editorialArr(a.quotes)
+    .map((x) => ({
+      text: editorialTxt(x && (typeof x === "string" ? x : x.text || x.quote)),
+      who: editorialTxt(x && x.who),
+      time: editorialTxt(x && x.time),
+    }))
+    .filter((x) => x.text);
+  if (!quotes.length) {
+    quotes = editorialArr(stats.highlights)
+      .slice(0, 5)
+      .map((x) => ({
+        text: editorialTxt(x && (x.text || x.content)),
+        who: editorialTxt(x && (x.sender_name || x.who)),
+        time: editorialTxt(x && x.time).slice(11, 16),
+      }))
+      .filter((x) => x.text);
+  }
+
+  const closing =
+    editorialTxt(a.closing) ||
+    (metrics.total
+      ? "这一期收录 " + metrics.total + " 条消息、" + metrics.senders + " 位发言者。下期见。"
+      : "这一期到此为止。下期见。");
+
+  return {
+    kicker: editorialTxt(a.kicker) || periodLabel || "群像志",
+    headline: headline,
+    deck: deck,
+    lead: lead,
+    sections: sections.slice(0, 6),
+    characters: characters,
+    timeline: timeline.slice(0, 8),
+    quotes: quotes.slice(0, 8),
+    closing: closing,
+    metrics: metrics,
+    title: title,
+    rangeLabel: rangeLabel,
+    periodLabel: periodLabel,
+  };
+}
+
+/** 编辑部分析：只产出版面需要的叙事字段，不重复统计图表。 */
+function editorialPrompt(o) {
+  const lines = [
+    "你是这份「群聊画报」的**主编**。请把给定的统计基线与已有分析，重新组织成一份有版面感的中文刊物内容。",
+    "只读分析，不要向微信发送任何消息；不要编造统计基线里没有的数字。",
+    "",
+    "群： " + (o.sessionName || o.sessionId || ""),
+    "时间范围： " + (o.rangeStart || "") + " ~ " + (o.rangeEnd || ""),
+    "",
+    "## 统计基线（权威，不得与之矛盾）",
+    o.statsBrief || "（无）",
+    "",
+    "## 已有分析（可能为空；可复用其结论，但请改写成刊物语言）",
+    o.prevText || "（无）",
+    "",
+    "## 写作要求",
+    "- 语气：有编辑判断、有节奏，不要写成工作汇报；可以凝练、可以有轻微的文学性，但事实必须站得住。",
+    "- headline：不超过 24 字，要像刊物头条，不要用「总结」「分析」这类词。",
+    "- deck：30-60 字，补充头条而不是重复头条。",
+    "- lead：80-160 字，像导语一样把读者带进这段时间。",
+    "- sections：3-5 节，每节 title ≤ 14 字、body 120-240 字；可选 pull_quote（正文里最值得拉出来的一句）。",
+    "- characters：3-6 位本段时间最有戏的人；role 是 2-6 字抽象称号，quote 必须逐字来自给定材料，没有就给空字符串。",
+    "- timeline：3-6 个时间点，只写材料里能确认的事件；没有具体时刻就写「本段」。",
+    "- quotes：3-6 条原文摘录，必须逐字，不要改写。",
+    "- closing：1-2 句收尾，可以温和、可以有梗。",
+    "- 不要出现「本报告」「本分析」「子代理」「阶段」这类内部词。",
+    "- 样式由画报模板负责：**不要写 HTML / CSS / Markdown 标题**，正文只用纯文本与中文标点。",
+    "",
+    "第一部分：一段给编辑看的简短说明（可省略）。",
+    "第二部分：末尾追加结构化数据块，只放数据：",
+    "{",
+    '  "kicker": "栏目标签（≤8 字）",',
+    '  "headline": "头条（≤24 字）",',
+    '  "deck": "副标题（30-60 字）",',
+    '  "lead": "导语（80-160 字）",',
+    '  "sections": [{"title": "小节标题", "body": "正文", "pull_quote": "拉引（可空）", "stat": {"value": "42%", "label": "可空"}}],',
+    '  "characters": [{"name": "群友名", "role": "2-6 字称号", "quote": "逐字原话（可空）", "note": "一句补充（可空）"}],',
+    '  "timeline": [{"time": "HH:MM 或 本段", "event": "发生了什么", "note": "可空"}],',
+    '  "quotes": [{"text": "逐字原文", "who": "谁", "time": "HH:MM"}],',
+    '  "closing": "收尾（1-2 句）"',
+    "}",
+    AI_JSON_CONTRACT,
+  ];
+  const extra = String(o.extra || "").trim();
+  if (extra) lines.push("", "补充要求（用户自定义，优先遵守）：", extra);
+  return lines.join("\n");
+}
+
+
+/** 艺术画报：全屏滚动叙事 + 动效。单文件、无外链、prefers-reduced-motion 自动降级。 */
+function buildArtIssueHtml(opts) {
+  const o = opts || {};
+  const d = normalizeEditorial(o.aiData, o);
+  const m = d.metrics;
+  const skin = ["noir", "riso", "gallery", "cyber"].indexOf(o.skin) >= 0 ? o.skin : "noir";
+  const generatedAt = escHtml(o.generatedAt || new Date().toLocaleString());
+  const title = escHtml((d.title || "群聊") + " · " + d.kicker);
+  const headlineLines = issueHeadlineLines(d.headline, 11.5);
+  const headlineHtml = headlineLines.length
+    ? headlineLines.map((line) => '<span class="hl-line">' + escHtml(line) + "</span>").join("")
+    : escHtml(d.headline);
+
+  const metricCards = [
+    ["消息", fmtNum(m.total)],
+    ["发言者", fmtNum(m.senders)],
+    ["人均", m.perCapita],
+    ["峰值", m.peakHour ? m.peakHour + ":00" : "—"],
+  ]
+    .map(
+      (x, i) =>
+        '<div class="metric reveal" style="--d:' + i * 90 + 'ms">' +
+        '<div class="metric-k">' + escHtml(x[0]) + "</div>" +
+        '<div class="metric-v" data-count="' + escHtml(String(x[1])) + '">' + escHtml(x[1]) + "</div>" +
+        "</div>",
+    )
+    .join("");
+
+  const sectionsHtml = d.sections
+    .map(
+      (s, i) =>
+        '<article class="story reveal">' +
+        '<div class="story-side"><span class="story-no">' + String(i + 1).padStart(2, "0") + "</span>" +
+        (s.statValue ? '<span class="story-stat">' + escHtml(s.statValue) + (s.statLabel ? "<em>" + escHtml(s.statLabel) + "</em>" : "") + "</span>" : "") +
+        "</div>" +
+        '<div class="story-main"><h2>' + escHtml(s.title || "未命名小节") + "</h2>" +
+        '<p class="story-body">' + escHtml(s.body || "") + "</p>" +
+        (s.quote ? '<blockquote class="story-pull">' + escHtml(s.quote) + "</blockquote>" : "") +
+        "</div></article>",
+    )
+    .join("");
+
+  const charsHtml = d.characters
+    .map((c, i) => {
+      const face = c.face
+        ? '<img class="face" src="' + escHtml(c.face) + '" alt="">'
+        : '<span class="face face-initial" style="--tone:' + escHtml(speakerColor(c.name)) + '">' + escHtml(avatarChar(c.name)) + "</span>";
+      return (
+        '<figure class="portrait reveal" style="--d:' + (i % 4) * 80 + 'ms">' +
+        face +
+        '<figcaption><strong>' + escHtml(c.name) + "</strong>" +
+        (c.role ? '<span class="role">' + escHtml(c.role) + "</span>" : "") +
+        (c.quote ? '<q>' + escHtml(c.quote) + "</q>" : "") +
+        (c.note ? '<small>' + escHtml(c.note) + "</small>" : "") +
+        "</figcaption></figure>"
+      );
+    })
+    .join("");
+
+  const timelineHtml = d.timeline
+    .map(
+      (t) =>
+        '<li class="reveal"><time>' + escHtml(t.time || "本段") + "</time><div><b>" + escHtml(t.event || "") +
+        "</b>" + (t.note ? "<span>" + escHtml(t.note) + "</span>" : "") + "</div></li>",
+    )
+    .join("");
+
+  const quotesHtml = d.quotes
+    .map(
+      (q, i) =>
+        '<blockquote class="quote reveal" style="--d:' + (i % 3) * 100 + 'ms"><p>' + escHtml(q.text) + "</p>" +
+        (q.who || q.time ? "<cite>" + escHtml(q.who || "群友") + (q.time ? " · " + escHtml(q.time) : "") + "</cite>" : "") +
+        "</blockquote>",
+    )
+    .join("");
+
+  const css = `
+:root{--bg:#07080b;--ink:#f4f1ea;--muted:#a8a294;--line:rgba(244,241,234,.16);--accent:#d8b25e;--accent2:#7c5cff;--paper:rgba(255,255,255,.04);--serif:"Songti SC","Noto Serif CJK SC","Source Han Serif SC",Georgia,serif;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+html[data-skin="riso"]{--bg:#f3e7d6;--ink:#1c1a17;--muted:#6d6155;--line:rgba(28,26,23,.22);--accent:#e8442e;--accent2:#2a6fdb;--paper:rgba(28,26,23,.045)}
+html[data-skin="gallery"]{--bg:#f6f6f2;--ink:#101010;--muted:#6b6b66;--line:rgba(16,16,16,.18);--accent:#101010;--accent2:#e4572e;--paper:rgba(16,16,16,.035)}
+html[data-skin="cyber"]{--bg:#050510;--ink:#dff8ff;--muted:#7f9bb0;--line:rgba(0,240,255,.22);--accent:#00f0ff;--accent2:#ff2bd6;--paper:rgba(0,240,255,.05)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+#dust{position:fixed;inset:0;width:100%;height:100%;z-index:0;opacity:.55;pointer-events:none}
+.grain{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.5;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.22'/%3E%3C/svg%3E")}
+.progress{position:fixed;top:0;left:0;right:0;height:2px;z-index:9;background:transparent}
+.progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+main{position:relative;z-index:2}
+.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:14vh 8vw 10vh;position:relative;isolation:isolate}
+.hero:before{content:"";position:absolute;inset:-20% -10% 20%;background:radial-gradient(60% 55% at 62% 22%,color-mix(in srgb,var(--accent) 20%,transparent),transparent 70%),radial-gradient(45% 40% at 20% 70%,color-mix(in srgb,var(--accent2) 16%,transparent),transparent 72%);filter:blur(10px);z-index:-1}
+.kicker{font-size:12px;letter-spacing:.38em;text-transform:uppercase;color:var(--accent);font-weight:700}
+h1{font-family:var(--serif);font-size:clamp(42px,8.8vw,128px);line-height:.94;letter-spacing:-.045em;margin:.25em 0 .18em;max-width:14em;text-wrap:balance}
+.hl-line{display:block}
+.deck{max-width:36em;font-size:clamp(15px,1.5vw,21px);line-height:1.7;color:var(--muted);margin:0 0 2.4em}
+.byline{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;letter-spacing:.08em;color:var(--muted);border-top:1px solid var(--line);padding-top:16px;max-width:56em}
+.byline b{color:var(--ink);font-weight:600}
+.scroll-hint{margin-top:7vh;font-size:11px;letter-spacing:.24em;color:var(--muted);display:flex;align-items:center;gap:10px}
+.scroll-hint:after{content:"";width:52px;height:1px;background:linear-gradient(90deg,var(--accent),transparent)}
+section.band{padding:8vh 8vw}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
+.metric{background:var(--bg);padding:26px 22px}
+.metric-k{font-size:10px;letter-spacing:.22em;color:var(--muted);text-transform:uppercase}
+.metric-v{font-family:var(--serif);font-size:clamp(30px,4vw,54px);line-height:1.05;margin-top:8px}
+.lead{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:5vw;align-items:start}
+.lead-label{font-size:10px;letter-spacing:.24em;color:var(--accent);text-transform:uppercase}
+.lead p{font-family:var(--serif);font-size:clamp(22px,2.5vw,34px);line-height:1.55;margin:0}
+.stories{padding:4vh 8vw 10vh}
+.story{display:grid;grid-template-columns:minmax(0,150px) minmax(0,1fr);gap:4vw;padding:6vh 0;border-top:1px solid var(--line)}
+.story:last-child{border-bottom:1px solid var(--line)}
+.story-no{display:block;font-family:var(--serif);font-size:clamp(36px,4vw,58px);color:color-mix(in srgb,var(--accent) 80%,var(--ink));line-height:1}
+.story-stat{display:block;margin-top:18px;font-size:12px;color:var(--muted)}
+.story-stat em{display:block;font-style:normal;font-size:10px;letter-spacing:.12em;margin-top:4px}
+.story-main h2{font-family:var(--serif);font-size:clamp(26px,3.2vw,44px);line-height:1.25;margin:0 0 .7em;font-weight:600}
+.story-body{font-size:15px;line-height:2;color:var(--muted);margin:0;max-width:44em;text-align:justify}
+.story-pull{font-family:var(--serif);font-size:clamp(18px,2vw,25px);line-height:1.7;margin:1.8em 0 0;padding-left:1.2em;border-left:2px solid var(--accent);color:var(--ink)}
+.portraits{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1px;background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.portrait{margin:0;padding:28px 24px;background:var(--bg);min-height:230px}
+.face{width:56px;height:56px;border-radius:50%;object-fit:cover;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:600;color:#fff;background:var(--tone,#555)}
+.face-initial{border:1px solid rgba(255,255,255,.25)}
+.portrait figcaption{margin-top:16px}
+.portrait strong{display:block;font-size:16px}
+.portrait .role{display:block;font-size:11px;letter-spacing:.12em;color:var(--accent);margin-top:5px}
+.portrait q{display:block;font-family:var(--serif);font-size:14px;line-height:1.75;color:var(--muted);margin-top:12px}
+.portrait small{display:block;font-size:11px;color:var(--muted);opacity:.7;margin-top:8px}
+.timeline{list-style:none;margin:0;padding:0;position:relative}
+.timeline:before{content:"";position:absolute;left:64px;top:0;bottom:0;width:1px;background:var(--line)}
+.timeline li{display:grid;grid-template-columns:64px minmax(0,1fr);gap:28px;padding:18px 0;position:relative}
+.timeline time{font-size:11px;color:var(--accent);letter-spacing:.08em;text-align:right;padding-top:3px}
+.timeline b{font-size:15px;font-weight:500}
+.timeline span{display:block;font-size:12px;color:var(--muted);margin-top:5px}
+.quotes{padding:8vh 8vw 12vh;columns:2;column-gap:8vw}
+.quote{break-inside:avoid;margin:0 0 5vh;padding-top:18px;border-top:1px solid var(--line)}
+.quote p{font-family:var(--serif);font-size:clamp(17px,1.8vw,23px);line-height:1.75;margin:0}
+.quote cite{display:block;font-style:normal;font-size:11px;letter-spacing:.1em;color:var(--muted);margin-top:14px}
+.closing{padding:12vh 8vw 16vh;text-align:center;border-top:1px solid var(--line)}
+.closing p{font-family:var(--serif);font-size:clamp(20px,2.4vw,30px);line-height:1.8;max-width:30em;margin:0 auto}
+footer{padding:4vh 8vw 6vh;font-size:10px;letter-spacing:.12em;color:var(--muted);display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .9s ease,transform .9s cubic-bezier(.2,.7,.2,1);transition-delay:var(--d,0ms)}
+.reveal.in{opacity:1;transform:none}
+@media (max-width:820px){.metrics{grid-template-columns:repeat(2,1fr)}.lead,.story{grid-template-columns:1fr;gap:18px}.timeline:before{left:0}.timeline li{grid-template-columns:1fr;gap:6px}.timeline time{text-align:left}.quotes{columns:1}.hero{padding-top:12vh}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.reveal{opacity:1;transform:none;transition:none}#dust{display:none}}
+@media print{#dust,.grain,.progress,.scroll-hint{display:none}body{background:#fff;color:#000}.reveal{opacity:1;transform:none}}
+`;
+
+  const script = `
+(function(){
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var els = document.querySelectorAll('.reveal');
+  if (reduce || !('IntersectionObserver' in window)) {
+    els.forEach(function(el){ el.classList.add('in'); });
+  } else {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(en){ if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); } });
+    }, { threshold: 0.14 });
+    els.forEach(function(el){ io.observe(el); });
+  }
+  var bar = document.querySelector('.progress i');
+  function onScroll(){
+    var h = document.documentElement;
+    var max = h.scrollHeight - h.clientHeight;
+    if (bar) bar.style.width = (max > 0 ? (h.scrollTop / max) * 100 : 0) + '%';
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+  if (reduce) return;
+  var c = document.getElementById('dust');
+  if (!c) return;
+  var ctx = c.getContext('2d');
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var w = 0, hgt = 0, parts = [];
+  function resize(){
+    w = c.clientWidth; hgt = c.clientHeight;
+    c.width = Math.round(w * dpr); c.height = Math.round(hgt * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    parts = [];
+    var n = Math.min(80, Math.round(w * hgt / 26000));
+    for (var i = 0; i < n; i++) {
+      parts.push({ x: Math.random() * w, y: Math.random() * hgt, r: Math.random() * 1.5 + .35, v: Math.random() * .22 + .04, a: Math.random() * .5 + .15 });
+    }
+  }
+  function frame(){
+    ctx.clearRect(0, 0, w, hgt);
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      p.y -= p.v; if (p.y < -4) { p.y = hgt + 4; p.x = Math.random() * w; }
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(255,255,255,' + p.a + ')';
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    requestAnimationFrame(frame);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+  requestAnimationFrame(frame);
+})();
+`;
+
+  return (
+    "<!doctype html><html lang=\"zh-CN\" data-skin=\"" + skin + "\"><head><meta charset=\"utf-8\">" +
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+    "<title>" + title + "</title><style>" + css + "</style></head><body>" +
+    '<canvas id="dust" aria-hidden="true"></canvas><div class="grain" aria-hidden="true"></div>' +
+    '<div class="progress"><i></i></div><main>' +
+    '<header class="hero">' +
+    '<div class="kicker">' + escHtml(d.kicker) + "</div>" +
+    "<h1>" + headlineHtml + "</h1>" +
+    (d.deck ? '<p class="deck">' + escHtml(d.deck) + "</p>" : "") +
+    '<div class="byline"><span><b>' + escHtml(d.title) + "</b></span><span>" + escHtml(d.rangeLabel) + "</span><span>" + escHtml(d.periodLabel) + "</span></div>" +
+    '<div class="scroll-hint">向下滚动</div></header>' +
+    '<section class="band"><div class="metrics">' + metricCards + "</div></section>" +
+    '<section class="band"><div class="lead"><div class="lead-label">导语</div><p>' + escHtml(d.lead) + "</p></div></section>" +
+    '<section class="stories">' + sectionsHtml + "</section>" +
+    (charsHtml ? '<section class="band"><div class="lead-label" style="margin-bottom:2em">人物</div><div class="portraits">' + charsHtml + "</div></section>" : "") +
+    (timelineHtml ? '<section class="band"><div class="lead-label" style="margin-bottom:2em">时间线</div><ul class="timeline">' + timelineHtml + "</ul></section>" : "") +
+    (quotesHtml ? '<section class="quotes">' + quotesHtml + "</section>" : "") +
+    '<section class="closing"><p>' + escHtml(d.closing) + "</p></section>" +
+    "<footer><span>由 Snow App「微信群聊」生成</span><span>" + generatedAt + "</span></footer>" +
+    "</main><script>" + script + "</script></body></html>"
+  );
+}
+
+
+/** 报纸画报：报头 + 分栏 + 首字下沉，可直接 Ctrl+P 成 PDF。 */
+function buildNewspaperHtml(opts) {
+  const o = opts || {};
+  const d = normalizeEditorial(o.aiData, o);
+  const m = d.metrics;
+  const variant = ["broadsheet", "extra", "tabloid"].indexOf(o.variant) >= 0 ? o.variant : "broadsheet";
+  const generatedAt = escHtml(o.generatedAt || new Date().toLocaleString());
+  const pageTitle = escHtml((d.title || "群聊") + " · 群聊画报");
+  const headlineLines = issueHeadlineLines(d.headline, 9.5);
+  const headlineHtml = headlineLines.length
+    ? headlineLines.map((line) => '<span class="hl-line">' + escHtml(line) + "</span>").join("")
+    : escHtml(d.headline);
+
+  const masters = [
+    ["消息", fmtNum(m.total)],
+    ["发言者", fmtNum(m.senders)],
+    ["人均", m.perCapita],
+    ["峰值", m.peakHour ? m.peakHour + ":00" : "—"],
+    ["热词", m.topPhrase || "—"],
+  ]
+    .filter((x) => x[1] && x[1] !== "—")
+    .map((x) => '<div class="num-item"><span>' + escHtml(x[0]) + "</span><b>" + escHtml(x[1]) + "</b></div>")
+    .join("");
+
+  const storiesHtml = d.sections
+    .map(
+      (s, i) =>
+        '<article class="story">' +
+        '<h3>' + (i === 0 ? '<span class="story-tag">头条</span>' : "") + escHtml(s.title || "未命名") + "</h3>" +
+        '<p>' + escHtml(s.body || "") + "</p>" +
+        (s.quote ? '<div class="pull">「' + escHtml(s.quote) + "」</div>" : "") +
+        (s.statValue ? '<div class="story-stat"><b>' + escHtml(s.statValue) + "</b>" + escHtml(s.statLabel || "") + "</div>" : "") +
+        "</article>",
+    )
+    .join("");
+
+  const peopleHtml = d.characters
+    .map((c) => {
+      const face = c.face
+        ? '<img class="face" src="' + escHtml(c.face) + '" alt="">'
+        : '<span class="face face-initial" style="background:' + escHtml(speakerColor(c.name)) + '">' + escHtml(avatarChar(c.name)) + "</span>";
+      return (
+        '<div class="person">' + face +
+        '<div><b>' + escHtml(c.name) + "</b>" +
+        (c.role ? "<em>" + escHtml(c.role) + "</em>" : "") +
+        (c.quote ? '<q>' + escHtml(c.quote) + "</q>" : "") +
+        (c.note ? "<small>" + escHtml(c.note) + "</small>" : "") +
+        "</div></div>"
+      );
+    })
+    .join("");
+
+  const timelineHtml = d.timeline
+    .map(
+      (t) =>
+        '<li><time>' + escHtml(t.time || "本段") + "</time><div><b>" + escHtml(t.event || "") +
+        "</b>" + (t.note ? "<span>" + escHtml(t.note) + "</span>" : "") + "</div></li>",
+    )
+    .join("");
+
+  const quotesHtml = d.quotes
+    .map(
+      (q) =>
+        '<div class="letter"><p>' + escHtml(q.text) + "</p>" +
+        (q.who || q.time ? "<cite>—— " + escHtml(q.who || "群友") + (q.time ? "，" + escHtml(q.time) : "") + "</cite>" : "") +
+        "</div>",
+    )
+    .join("");
+
+  const css = `
+:root{--paper:#f3ecdf;--ink:#1b1916;--muted:#5f574b;--accent:#8f1d1d;--rule:rgba(27,25,22,.55);--hair:rgba(27,25,22,.22);--serif:"Songti SC","Noto Serif CJK SC","Source Han Serif SC",Georgia,serif;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#d8d0c2;color:var(--ink);font-family:var(--sans);padding:28px 16px 60px}
+.sheet{max-width:1180px;margin:0 auto;background:var(--paper);padding:36px 44px 30px;box-shadow:0 18px 50px rgba(0,0,0,.22);position:relative}
+.sheet:before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;background-image:radial-gradient(rgba(27,25,22,.055) .8px,transparent .9px);background-size:4px 4px}
+.masthead{position:relative;z-index:1;border-bottom:3px double var(--rule);padding-bottom:10px}
+.topline{display:flex;justify-content:space-between;gap:16px;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.masthead h1{font-family:var(--serif);font-weight:900;font-size:clamp(46px,7.4vw,92px);line-height:1;letter-spacing:.04em;text-align:center;margin:14px 0 8px}
+.masthead .sub{text-align:center;font-family:var(--serif);font-size:clamp(15px,1.6vw,20px);letter-spacing:.18em;color:var(--accent);margin-bottom:10px}
+.dateline{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;font-size:10px;letter-spacing:.12em;color:var(--muted);border-top:1px solid var(--hair);padding-top:8px}
+.front{display:grid;grid-template-columns:minmax(0,2.05fr) minmax(0,0.95fr);gap:26px;margin:26px 0 8px;align-items:start}
+.lead{border-right:1px solid var(--hair);padding-right:26px}
+.kicker{display:inline-block;font-size:10px;letter-spacing:.2em;color:#fff;background:var(--accent);padding:4px 9px;margin-bottom:10px}
+.lead h2{font-family:var(--serif);font-size:clamp(32px,4.4vw,58px);line-height:1.16;margin:.1em 0 .35em;letter-spacing:-.01em}
+.lead h2 .hl-line{display:block}
+.deck{font-family:var(--serif);font-size:17px;line-height:1.7;color:var(--muted);margin:0 0 14px;font-style:italic}
+.lead p.drop{font-size:14.5px;line-height:1.95;margin:0;text-align:justify}
+.lead p.drop:first-letter{float:left;font-family:var(--serif);font-size:58px;line-height:.86;padding:6px 8px 0 0;color:var(--accent);font-weight:700}
+.numbers{border-top:3px solid var(--rule);border-bottom:1px solid var(--hair)}
+.num-item{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:9px 2px;border-bottom:1px dotted var(--hair)}
+.num-item:last-child{border-bottom:0}
+.num-item span{font-size:10px;letter-spacing:.16em;color:var(--muted)}
+.num-item b{font-family:var(--serif);font-size:21px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%}
+.section-rule{display:flex;align-items:center;gap:12px;margin:26px 0 14px}
+.section-rule:before,.section-rule:after{content:"";flex:1;height:1px;background:var(--rule)}
+.section-rule span{font-family:var(--serif);font-size:13px;letter-spacing:.3em;white-space:nowrap}
+.columns{columns:3;column-gap:24px;column-rule:1px solid var(--hair)}
+.story{break-inside:avoid;page-break-inside:avoid;margin:0 0 20px}
+.story h3{font-family:var(--serif);font-size:21px;line-height:1.35;margin:0 0 7px;font-weight:700}
+.story-tag{display:inline-block;font-family:var(--sans);font-size:9px;letter-spacing:.1em;color:#fff;background:var(--ink);padding:2px 5px;margin-right:6px;vertical-align:2px}
+.story p{font-size:13px;line-height:1.9;margin:0;text-align:justify;color:#2a2723}
+.pull{font-family:var(--serif);font-size:16px;line-height:1.7;border-top:2px solid var(--ink);border-bottom:1px solid var(--hair);padding:9px 0;margin:10px 0;color:var(--accent)}
+.story-stat{display:flex;align-items:baseline;gap:8px;margin-top:8px;font-size:10px;color:var(--muted)}
+.story-stat b{font-family:var(--serif);font-size:22px;color:var(--ink)}
+.lower{display:grid;grid-template-columns:1.15fr .85fr;gap:26px;margin-top:12px;border-top:3px double var(--rule);padding-top:18px}
+.block-h{font-family:var(--serif);font-size:15px;letter-spacing:.24em;margin:0 0 12px;border-bottom:1px solid var(--rule);padding-bottom:6px}
+.people{display:grid;grid-template-columns:1fr 1fr;gap:14px 18px}
+.person{display:flex;gap:10px;align-items:flex-start;border-top:1px dotted var(--hair);padding-top:10px}
+.face{width:42px;height:42px;border-radius:50%;object-fit:cover;flex:0 0 42px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700}
+.person b{display:block;font-size:13px}
+.person em{display:block;font-style:normal;font-size:10px;letter-spacing:.08em;color:var(--accent);margin:2px 0 4px}
+.person q{display:block;font-family:var(--serif);font-size:12px;line-height:1.65;color:var(--muted)}
+.person small{display:block;font-size:10px;color:var(--muted);margin-top:3px}
+.timeline{list-style:none;margin:0;padding:0}
+.timeline li{display:grid;grid-template-columns:52px 1fr;gap:10px;padding:7px 0;border-bottom:1px dotted var(--hair)}
+.timeline time{font-size:10px;color:var(--accent);letter-spacing:.04em;padding-top:2px}
+.timeline b{display:block;font-size:12px}
+.timeline span{display:block;font-size:10px;color:var(--muted);margin-top:2px}
+.letters{columns:2;column-gap:24px;margin-top:22px;border-top:3px double var(--rule);padding-top:18px}
+.letter{break-inside:avoid;margin:0 0 16px}
+.letter p{font-family:var(--serif);font-size:14px;line-height:1.8;margin:0}
+.letter cite{display:block;font-style:normal;font-size:10px;color:var(--muted);margin-top:5px;text-align:right}
+.closing{margin-top:22px;border-top:1px solid var(--rule);padding-top:14px;text-align:center;font-family:var(--serif);font-size:15px;line-height:1.8}
+footer{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:9px;letter-spacing:.1em;color:var(--muted);border-top:1px solid var(--hair);margin-top:18px;padding-top:8px}
+html[data-variant="extra"] .masthead h1{color:var(--accent);font-size:clamp(58px,9vw,118px)}
+html[data-variant="extra"] .masthead{position:relative}
+html[data-variant="extra"] .masthead:after{content:"号外";position:absolute;right:0;top:34px;font-family:var(--serif);font-size:clamp(34px,5vw,64px);color:var(--accent);border:3px solid var(--accent);padding:2px 10px;transform:rotate(-8deg);opacity:.9}
+html[data-variant="tabloid"] .sheet{max-width:880px;padding:26px 30px}
+html[data-variant="tabloid"] .front{grid-template-columns:1fr}
+html[data-variant="tabloid"] .lead{border-right:0;padding-right:0;border-bottom:1px solid var(--hair);padding-bottom:18px}
+html[data-variant="tabloid"] .columns{columns:2}
+html[data-variant="tabloid"] .masthead h1{font-size:clamp(42px,6vw,66px)}
+@media (max-width:880px){body{padding:12px 8px 36px}.sheet{padding:22px 20px}.front{grid-template-columns:1fr}.lead{border-right:0;padding-right:0;border-bottom:1px solid var(--hair);padding-bottom:18px}.columns{columns:1}.lower{grid-template-columns:1fr}.people{grid-template-columns:1fr}.letters{columns:1}}
+@media print{
+  @page{size:A4;margin:12mm}
+  body{background:#fff;padding:0}
+  .sheet{box-shadow:none;max-width:none;padding:0}
+  .sheet:before{display:none}
+  .columns{columns:2;column-gap:8mm}
+  .lead h2{font-size:32pt}
+  .masthead h1{font-size:44pt}
+  .story,.person,.letter,.num-item{break-inside:avoid;page-break-inside:avoid}
+  .front,.lower{break-inside:avoid}
+  a{color:inherit;text-decoration:none}
+}
+`;
+
+  return (
+    "<!doctype html><html lang=\"zh-CN\" data-variant=\"" + variant + "\"><head><meta charset=\"utf-8\">" +
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+    "<title>" + pageTitle + "</title><style>" + css + "</style></head><body>" +
+    '<div class="sheet"><header class="masthead">' +
+    '<div class="topline"><span>' + escHtml(d.kicker) + "</span><span>第 " + escHtml(d.periodLabel || "—") + " 期</span></div>" +
+    "<h1>" + escHtml(d.title) + "</h1>" +
+    '<div class="sub">群 聊 画 报</div>' +
+    '<div class="dateline"><span>' + escHtml(d.rangeLabel) + "</span><span>" + generatedAt + "</span></div>" +
+    "</header>" +
+    '<section class="front"><article class="lead">' +
+    '<span class="kicker">' + escHtml(d.kicker) + "</span>" +
+    "<h2>" + headlineHtml + "</h2>" +
+    (d.deck ? '<p class="deck">' + escHtml(d.deck) + "</p>" : "") +
+    '<p class="drop">' + escHtml(d.lead) + "</p></article>" +
+    '<aside class="numbers">' + masters + "</aside></section>" +
+    '<div class="section-rule"><span>本段纪事</span></div>' +
+    '<div class="columns">' + storiesHtml + "</div>" +
+    '<div class="lower">' +
+    '<section><h4 class="block-h">人物</h4><div class="people">' + peopleHtml + "</div></section>" +
+    '<section><h4 class="block-h">大事记</h4><ul class="timeline">' + timelineHtml + "</ul></section>" +
+    "</div>" +
+    (quotesHtml ? '<section class="letters"><h4 class="block-h">读者来信</h4>' + quotesHtml + "</section>" : "") +
+    '<div class="closing">' + escHtml(d.closing) + "</div>" +
+    "<footer><span>由 Snow App「微信群聊」生成</span><span>数据来自本机 wechat MCP（只读）</span></footer>" +
+    "</div></body></html>"
+  );
+}
+
 /** 成员导出的文件名主干：wechat-成员-<群>-<成员>-<日期-时刻>（不含扩展名）。
     带时分秒是为了同一天多次导出（例如换档位重跑后想两版对比）不会互相覆盖。 */
 function memberFileStem(groupName, memberName) {
   return (
-    "wechat-成员-" +
     safeFileName(groupName || "wechat", "wechat") +
     "-" +
     safeFileName(memberName || "member", "member") +
@@ -3697,6 +4355,21 @@ function WechatPanel({ api, locale }) {
   // 当前阶段的会话 id：中止时用它调 conversations.abort（会级联中止其子代理）
   const deepConvRef = useRef("");
   const deepUnsubRef = useRef(null);
+  // 画报（艺术页 / 报纸）：编辑部分析独立于群分析、深挖，单独代次与会话槽位。
+  const [issueSkin, setIssueSkin] = useState("noir");
+  const [paperVariant, setPaperVariant] = useState("broadsheet");
+  const [editorialData, setEditorialData] = useState(null);
+  const [editorialText, setEditorialText] = useState("");
+  const [editorialBusy, setEditorialBusy] = useState(false);
+  const [editorialMsg, setEditorialMsg] = useState("");
+  const [editorialStatus, setEditorialStatus] = useState("");
+  const [issueBusy, setIssueBusy] = useState(false);
+  const editorialGenRef = useRef(0);
+  const editorialConvRef = useRef("");
+  const editorialUnsubRef = useRef(null);
+  // shownAiText / shownAiData / periodLabel 的声明都在下面：画报回调通过这个 ref 读取，
+  // 避免 useCallback 依赖数组在初始化阶段提前求值触发 TDZ。
+  const issueCtxRef = useRef({ text: "", data: null, periodLabel: "" });
 
   // 流式读取的轮询定时器也必须放在顶部：startPoll / 卸载清理 / 收起画像都会引用
   const stopPoll = useCallback(() => {
@@ -4495,6 +5168,55 @@ function WechatPanel({ api, locale }) {
 
   /* ---- 总结持久化：刷新面板 / 切群再回来都不丢（存 api.storage，按会话分键） ---- */
   const summaryKey = useCallback((sid) => "aiSummary:" + String(sid || ""), []);
+  const editorialKey = useCallback(
+    (sid, start, end) => "editorial:" + String(sid || "") + ":" + String(start || "") + ":" + String(end || ""),
+    [],
+  );
+
+  // 编辑部分析完成即落盘；换范围 / 切群时旧的口径不再显示。
+  useEffect(() => {
+    if (!sessionId || editorialStatus !== "done" || !editorialData) return;
+    try {
+      if (api.storage && api.storage.setJson) {
+        api.storage.setJson(editorialKey(sessionId, rangeStart, rangeEnd), {
+          data: editorialData,
+          text: editorialText,
+          rangeStart: rangeStart,
+          rangeEnd: rangeEnd,
+          at: Date.now(),
+        });
+      }
+    } catch (err) {
+      /* 缓存失败不影响生成 */
+    }
+  }, [api, sessionId, rangeStart, rangeEnd, editorialStatus, editorialData, editorialText, editorialKey]);
+
+  useEffect(() => {
+    let alive = true;
+    // 口径变化立刻作废在途的编辑部分析，避免旧范围的版面写进新范围。
+    editorialGenRef.current += 1;
+    setEditorialData(null);
+    setEditorialText("");
+    setEditorialStatus("");
+    setEditorialMsg("");
+    setEditorialBusy(false);
+    setIssueBusy(false);
+    if (!sessionId) return () => { alive = false; };
+    Promise.resolve()
+      .then(() => (api.storage && api.storage.getJson ? api.storage.getJson(editorialKey(sessionId, rangeStart, rangeEnd)) : null))
+      .then((saved) => {
+        if (!alive || !saved || !saved.data) return;
+        if (!scopeMatches(saved, rangeStart, rangeEnd, false)) return;
+        setEditorialData(saved.data);
+        setEditorialText(String(saved.text || ""));
+        setEditorialStatus("done");
+        setEditorialMsg("已恢复本范围的画报内容（" + new Date(saved.at || Date.now()).toLocaleString() + "）");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [api, sessionId, rangeStart, rangeEnd, editorialKey]);
 
   // 总结完成即落盘（正文 + 结构化数据 + 覆盖的时间范围）
   useEffect(() => {
@@ -4781,7 +5503,12 @@ function WechatPanel({ api, locale }) {
   // 与单轮管线（runAi）完全隔离：独立代次、独立 ref，绝不复用 aiUnsubRef / aiPollRef。
   const runOneTurn = useCallback(
     (opts) => {
+      // genRef / convRef / unsubRef 允许调用方注入自己的代次与槽位：
+      // 深挖与画报编辑部分析共用这套执行器，但互不干扰、互不中止。
       const { title, text, gen, onText } = opts;
+      const gRef = opts.genRef || deepGenRef;
+      const cRef = opts.convRef || deepConvRef;
+      const uRef = opts.unsubRef || deepUnsubRef;
       return (async () => {
         const directoryId = await resolveDirectoryId(api);
         const res = await api.write.run("conversations.create", {
@@ -4796,8 +5523,8 @@ function WechatPanel({ api, locale }) {
         }
         const convId = res.data && res.data.conversationId;
         if (!convId) throw new Error("创建会话未返回 conversationId");
-        if (deepGenRef.current !== gen) throw new Error("已中止");
-        deepConvRef.current = convId;
+        if (gRef.current !== gen) throw new Error("已中止");
+        cRef.current = convId;
         const startedAt = Date.now();
         return await new Promise((resolve, reject) => {
           let timer = null;
@@ -4813,7 +5540,7 @@ function WechatPanel({ api, locale }) {
             } catch (err) {
               /* 退订失败无所谓 */
             }
-            if (deepUnsubRef.current === unsub) deepUnsubRef.current = null;
+            if (uRef.current === unsub) uRef.current = null;
             fn(val);
           };
           const handle = (data) => {
@@ -4828,7 +5555,7 @@ function WechatPanel({ api, locale }) {
           };
           const tick = async () => {
             if (closed) return;
-            if (deepGenRef.current !== gen) {
+            if (gRef.current !== gen) {
               finish(reject, new Error("已中止"));
               return;
             }
@@ -4867,7 +5594,7 @@ function WechatPanel({ api, locale }) {
                 return;
               }
               unsub = fn;
-              deepUnsubRef.current = fn;
+              uRef.current = fn;
             })
             .catch(() => {
               /* 订阅不可用：轮询兜底 */
@@ -5043,6 +5770,166 @@ function WechatPanel({ api, locale }) {
     }
     if (deepGenRef.current === gen) setDeepBusy(false);
   }, [api, sessionId, rangeStart, rangeEnd, stats, statsScope, statsRange, current, aiSettings, aiBusy, aiStatus, deepBusy, runOneTurn, patchDeepStep, t.pick]);
+
+  /* ---- 画报：编辑部分析 + 单文件 HTML 生成 ----
+     与群分析 / 深挖共用 runOneTurn，但注入独立 genRef/convRef，互不中止。 */
+  const runEditorial = useCallback(async () => {
+    if (!sessionId) {
+      setEditorialMsg("先选择一个群聊。");
+      return null;
+    }
+    if (editorialBusy || aiBusy || deepBusy) {
+      setEditorialMsg("已有分析在运行，等它结束再做画报。");
+      return null;
+    }
+    const gen = ++editorialGenRef.current;
+    const sid = sessionId;
+    const startScope = rangeStart;
+    const endScope = rangeEnd;
+    const statsForEditorial = statsIsFresh(statsScope, statsRange, sid, startScope, endScope) ? stats : null;
+    const groupName = (current && current.display_name) || sid;
+    const statsBrief = buildStatsBrief(statsForEditorial, current, sid, startScope, endScope);
+    const prevText = clipForStage(
+      (
+        stripAiJson(String(issueCtxRef.current.text || "")).trim() +
+        (issueCtxRef.current.data ? "\n\n结构化结论：\n" + JSON.stringify(issueCtxRef.current.data) : "")
+      ).trim(),
+      9000,
+    );
+    setEditorialBusy(true);
+    setEditorialStatus("streaming");
+    setEditorialText("");
+    setEditorialData(null);
+    setEditorialMsg("编辑部正在组版…");
+    try {
+      const r = await runOneTurn({
+        title: "画报·编辑部：" + groupName + " " + startScope.slice(0, 10) + "~" + endScope.slice(0, 10),
+        text: editorialPrompt({
+          sessionName: groupName,
+          sessionId: sid,
+          rangeStart: startScope,
+          rangeEnd: endScope,
+          statsBrief: statsBrief,
+          prevText: prevText,
+          extra: aiSettings.extra,
+        }),
+        gen: gen,
+        genRef: editorialGenRef,
+        convRef: editorialConvRef,
+        unsubRef: editorialUnsubRef,
+        onText: (txt) => {
+          if (editorialGenRef.current !== gen) return;
+          setEditorialText(stripAiJson(txt));
+          const partial = parseAiData(txt);
+          if (partial) {
+            setEditorialData(
+              normalizeEditorial(partial, {
+                stats: statsForEditorial,
+                title: groupName,
+                rangeLabel: startScope + " ~ " + endScope,
+                periodLabel: issueCtxRef.current.periodLabel,
+                avatarMap: avatars,
+              }),
+            );
+          }
+        },
+      });
+      if (editorialGenRef.current !== gen) return null;
+      const live = liveScopeRef.current;
+      if (live.sessionId !== sid || live.rangeStart !== startScope || live.rangeEnd !== endScope) return null;
+      const ai = parseAiData(r.text);
+      if (!ai) throw new Error("未解析到版面数据块（模型可能未按契约输出）");
+      const normalized = normalizeEditorial(ai, {
+        stats: statsForEditorial,
+        title: groupName,
+        rangeLabel: startScope + " ~ " + endScope,
+        periodLabel: issueCtxRef.current.periodLabel,
+        avatarMap: avatars,
+      });
+      setEditorialData(normalized);
+      setEditorialText(stripAiJson(r.text));
+      setEditorialStatus("done");
+      setEditorialMsg(
+        r.incomplete
+          ? "编辑部分析超时收口：版面内容可能不完整，建议核对后再生成。"
+          : "编辑部内容已就绪：可以生成艺术画报或报纸画报。",
+      );
+      return normalized;
+    } catch (err) {
+      if (editorialGenRef.current === gen) {
+        setEditorialStatus("error");
+        setEditorialMsg("编辑部分析失败：" + errText(err));
+      }
+      return null;
+    } finally {
+      if (editorialGenRef.current === gen) setEditorialBusy(false);
+    }
+  }, [
+    api, sessionId, rangeStart, rangeEnd, stats, statsScope, statsRange, current, avatars,
+    aiSettings.extra, parseAiData, runOneTurn,
+    editorialBusy, aiBusy, deepBusy,
+  ]);
+
+  const saveIssue = useCallback(
+    async (kind) => {
+      if (!sessionId) {
+        setEditorialMsg("先选择一个群聊。");
+        return;
+      }
+      if (!statsIsFresh(statsScope, statsRange, sessionId, rangeStart, rangeEnd)) {
+        setEditorialMsg("当前统计不属于这个群 / 这个时间窗：请先点「统计」再生成画报。");
+        return;
+      }
+      if (issueBusy || editorialBusy) return;
+      setIssueBusy(true);
+      setEditorialMsg(kind === "art" ? "正在生成艺术画报…" : "正在生成报纸画报…");
+      try {
+        const data = editorialData || (await runEditorial());
+        if (!data) return;
+        const root = await resolveProjectPath(api);
+        if (!root) {
+          setEditorialMsg("拿不到当前项目路径：请先在 Snow App 打开一个项目再生成。");
+          return;
+        }
+        const groupName = (current && current.display_name) || sessionId;
+        const ctx = {
+          aiData: data,
+          stats: stats,
+          title: groupName,
+          rangeLabel: rangeStart + " ~ " + rangeEnd,
+          periodLabel: issueCtxRef.current.periodLabel,
+          avatarMap: avatars,
+          generatedAt: new Date().toLocaleString(),
+        };
+        const html =
+          kind === "art"
+            ? buildArtIssueHtml(Object.assign({}, ctx, { skin: issueSkin }))
+            : buildNewspaperHtml(Object.assign({}, ctx, { variant: paperVariant }));
+        const label = kind === "art" ? "艺术画报-" + issueSkin : "报纸-" + paperVariant;
+        const name =
+          "wechat-" + safeFileName(label, "画报") + "-" + safeFileName(groupName, "wechat") + "-" +
+          rangeStart.slice(0, 10).replace(/-/g, "") + "-" + timeStamp() + ".html";
+        const sep = /[\\/]$/.test(root) ? "" : root.indexOf("\\") >= 0 ? "\\" : "/";
+        const filePath = root + sep + name;
+        const res = await api.write.run("filesystem.writeFile", { filePath: filePath, content: html });
+        if (!res || !res.ok) {
+          const why = res && res.denied ? res.denied.reason : res && res.error ? res.error : "未知错误";
+          setEditorialMsg("保存画报失败：" + why);
+          return;
+        }
+        setEditorialMsg("已生成 " + (kind === "art" ? "艺术画报" : "报纸画报") + "：" + filePath);
+        await api.write.run("panels.openFile", { filePath: filePath });
+      } catch (err) {
+        setEditorialMsg("生成画报失败：" + errText(err));
+      } finally {
+        setIssueBusy(false);
+      }
+    },
+    [
+      api, sessionId, stats, statsScope, statsRange, rangeStart, rangeEnd, current, avatars,
+      editorialData, editorialBusy, issueBusy, runEditorial, issueSkin, paperVariant,
+    ],
+  );
 
   /* ---- 角色维度：单个成员的近期发言分析（复用同一条流式管线，目标 = member） ---- */
   const memberPrompt = useCallback(
@@ -5491,6 +6378,7 @@ function WechatPanel({ api, locale }) {
     const map = { day: "日报", week: "周报", month: "月报", year: "年报", custom: "自定义报告" };
     return map[reportPeriod] || "报告";
   }, [reportPeriod]);
+  issueCtxRef.current = { text: shownAiText, data: shownAiData, periodLabel: periodLabel };
 
   const toggleSection = useCallback((key) => {
     setReportSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -5840,6 +6728,21 @@ function WechatPanel({ api, locale }) {
         /* 忽略 */
       }
       aiUnsubRef.current = null;
+      // 画报编辑部分析与深挖各有独立订阅槽位，卸载时一并释放，别留下后台轮询。
+      editorialGenRef.current += 1;
+      try {
+        if (editorialUnsubRef.current) editorialUnsubRef.current();
+      } catch (err) {
+        /* 忽略 */
+      }
+      editorialUnsubRef.current = null;
+      deepGenRef.current += 1;
+      try {
+        if (deepUnsubRef.current) deepUnsubRef.current();
+      } catch (err) {
+        /* 忽略 */
+      }
+      deepUnsubRef.current = null;
       stopPoll();
     },
     [stopPoll],
@@ -7556,6 +8459,75 @@ function WechatPanel({ api, locale }) {
         h("button", { className: "swf-btn", disabled: !reportMd, onClick: saveReport }, "保存为 MD"),
         h("button", { className: "swf-btn", disabled: !stats, onClick: saveReportHtml }, "保存为 HTML 长图"),
       ),
+      // 画报：独立的编辑部分析 + 单文件 HTML（不在面板内嵌，直接写文件打开）
+      h("div", { className: "swf-section" }, "画报 · HTML"),
+      h(
+        "div",
+        { className: "swf-note", style: { margin: "0 4px 6px" } },
+        "与面板内的分析不同：画报会先跑一次「编辑部分析」重组版面语言（头条 / 导语 / 拉引 / 人物 / 时间线），再生成单文件 HTML。无外链、无 CDN，浏览器直接打开；报纸版可按 Ctrl+P 打成 PDF。",
+      ),
+      h(
+        "div",
+        { className: "swf-adv-limits" },
+        (function () {
+          const artOpts = [
+            ["noir", "暗色电影感"],
+            ["riso", "Riso 印刷"],
+            ["gallery", "瑞士画廊"],
+            ["cyber", "赛博霓虹"],
+          ];
+          const paperOpts = [
+            ["broadsheet", "大报"],
+            ["extra", "号外"],
+            ["tabloid", "小报"],
+          ];
+          return [
+            h(
+              "label",
+              { className: "swf-note", key: "issue-skin" },
+              "艺术风格",
+              h(
+                "select",
+                { className: "swf-input", value: issueSkin, onChange: (e) => setIssueSkin(e.target.value) },
+                artOpts.map(([v, label]) => h("option", { key: "skin-" + v, value: v }, label)),
+              ),
+            ),
+            h(
+              "label",
+              { className: "swf-note", key: "issue-variant" },
+              "报纸版式",
+              h(
+                "select",
+                { className: "swf-input", value: paperVariant, onChange: (e) => setPaperVariant(e.target.value) },
+                paperOpts.map(([v, label]) => h("option", { key: "pv-" + v, value: v }, label)),
+              ),
+            ),
+          ];
+        })(),
+      ),
+      h(
+        "div",
+        { className: "swf-actions" },
+        h(
+          "button",
+          { className: "swf-btn swf-btn-primary", disabled: !stats || issueBusy || editorialBusy, onClick: () => saveIssue("art") },
+          issueBusy ? "生成中…" : "生成艺术画报",
+        ),
+        h(
+          "button",
+          { className: "swf-btn", disabled: !stats || issueBusy || editorialBusy, onClick: () => saveIssue("paper") },
+          issueBusy ? "生成中…" : "生成报纸画报",
+        ),
+        h(
+          "button",
+          { className: "swf-btn", disabled: !stats || issueBusy || editorialBusy, onClick: runEditorial },
+          editorialBusy ? "组版中…" : "重新生成编辑部内容",
+        ),
+      ),
+      editorialStatus === "streaming"
+        ? h("div", { className: "swf-note" }, "编辑部分析进行中… 已收到 " + String(editorialText || "").length + " 字")
+        : null,
+      editorialMsg ? h("div", { className: "swf-note" }, editorialMsg) : null,
       // 定时日报：交给宿主定时任务（AI Loop），带幂等补发检查
       h(
         "details",
@@ -7995,3 +8967,4 @@ export function mount(container) {
     container.replaceChildren();
   };
 }
+

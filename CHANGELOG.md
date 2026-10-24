@@ -3,6 +3,47 @@
 > 本文件由原 README 的「演进摘要」按版本拆分而来，保留全部原始记录，仅做分段与标题整理。
 > 每个版本的发布资产见 [Releases](https://github.com/ShiroEirin/snow-wechat-panel/releases)。
 
+## v0.32.27
+
+**画报：编辑部分析 + 两套单文件 HTML（艺术画报 / 报纸画报）。** 面板是「看数据」的地方，画报是「讲故事」的地方。两者数据同源，但版面语言完全不同。
+
+### 编辑部分析
+
+面板现有 schema 是分析型（summary / key_points / topics…），缺头条、导语、拉引、人物卡这些版面字段。新增一次独立的「编辑部分析」会话（与群分析、深挖完全隔离，自己的 `genRef` / `convRef` / `subRef`）：
+
+- 输入：统计基线 + 现有分析（若有）
+- 输出：`kicker / headline / deck / lead / sections[] / characters[] / timeline[] / quotes[] / closing`
+- 约束：headline ≤24 字、deck 30-60 字、lead 80-160 字、sections 3-5 节；quote 必须逐字来自材料；禁止写 HTML/CSS
+- 缓存：按 `session + rangeStart + rangeEnd` 落盘，切回同一口径直接恢复；切范围立刻作废旧结果并在途调用作废
+- **降级**：模型不可用 / 没有编辑部分析时，`normalizeEditorial()` 会用 stats + 现有 AI 结论自动拼版面（头条、人物来自成员榜、时间线来自峰值小时、金句来自 highlights），不会出现空白画报
+
+### 艺术画报（Art Issue）
+
+- 全屏滚动叙事：超大标题、导语、指标带、分节、人物、时间线、拉引、读者来信
+- 动效：滚动揭示（IntersectionObserver）、顶部进度条、Canvas 浮尘背景、纸张颗粒叠层
+- 4 套皮肤共用一套结构：`noir` 暗色电影感 / `riso` Riso 印刷 / `gallery` 瑞士画廊 / `cyber` 赛博霓虹
+- `prefers-reduced-motion` 自动关闭动效；移动端单列重排
+
+### 报纸画报（Broadsheet）
+
+- 报头 masthead + 期号 + 日期线、双线分隔、三栏正文、首字下沉、拉引、人物版、大事记、读者来信
+- 3 种版式：`broadsheet` 大报 / `extra` 号外（红色大字 + 号外印章）/ `tabloid` 小报（窄版 + 双栏）
+- 完整 `@media print`：A4、12mm 页边距、正文两栏、`break-inside: avoid`，可直接 Ctrl+P 成 PDF
+
+### 工程约束
+
+- **单文件 HTML**：CSS/JS 全内联，无 CDN、无外部字体、无 `<link>`；`file://` 直接打开
+- 所有聊天内容严格 `escHtml`，模型不写 HTML/CSS；测试覆盖 `<script>` 注入
+- 头像用 data URL 内嵌，取不到回退首字色块
+- 标题按词分行（`Intl.Segmenter`），避免把「深夜」拆开或只剩一个字掉行
+- 通过 `filesystem.writeFile` 写到当前项目，再用 `panels.openFile` 打开；插件不能截图，也不承诺 PNG
+
+### UI
+
+「完整报告」下新增「画报 · HTML」：艺术风格 / 报纸版式两个选择器 +「生成艺术画报」「生成报纸画报」「重新生成编辑部内容」。生成过程显示组版字数与错误原因。
+
+测试 108 → **129 passed**（新增：编辑部分析提示词契约、指标口径、无 AI 降级、标题按词分行、两套 HTML 完整性与 XSS/外链检查）。
+
 ## v0.32.26
 
 **过期请求与结果口径收口（数据正确性，无 UI 改版）。** 起因是一次复审：测试全绿但问题都在 Promise 返回顺序里。这一版只修「会让用户看到错误数据」的路径，不加新功能。
