@@ -32,6 +32,7 @@ Snow App 插件（ESM 面板）。数据全部来自本机已安装的 **wechat 
 | **报告** | 日报 / 周报 / 月报 / 年报 / 自定义；导出 Markdown 或自包含 HTML 长图 |
 | **成员画像** | 多维榜（发言 / 字数 / 图片 / 表情 / 引用 / 深夜…）、检索榜外成员、AI 角色分析（称号 / 名场面 / 逆天瞬间 / 语言指纹 / 社交位置） |
 | **AI 分析** | 单会话分析；四阶段深挖（分段读事实 → 多视角 → 交叉验证 → 成稿）；群聊质量锐评 |
+| **画报** | 独立编辑部分析；4 套艺术皮肤 / 3 种报纸版式；离线单文件 HTML，章节导航、动效开关、移动适配、打印 PDF |
 | **MCP 工具台** | 28 个工具直接调用、原始返回、参数按当前群与日期预填；同步与定时同步 |
 
 ---
@@ -125,7 +126,9 @@ config-set scope=plugins key="new" value={ "sourceDir": "D:/github/snow-app/snow
 - 本地统计**零 token**：所有数字由 MCP 在 SQL 侧全量聚合。
 - 成员榜按维度切换，点头像展开成员画像；群自身账号不计入任何发言人维度。
 - 「AI 分析」有两种档位：**单会话**（一轮写完）与**深挖**（四阶段）。面板会按时间跨度与消息量给推荐，但不强制。
+- 429 / 5xx 等失败会明确显示「未完成」而非「处理中」；瞬时故障延迟 20 秒最多自动重试一次，可立即重试或取消。失败草稿不纳入报告，可打开会话自行查看。
 - 报告可复制、保存 Markdown、保存 HTML 长图、用内置阅读器打开。
+- 「画报 · HTML」先跑一次独立编辑部分析，再保存并打开艺术画报或报纸画报；首次多花一次 token，相同范围再次生成会复用缓存。艺术页可跳章节、关闭动效；报纸页可直接「打印 / 存为 PDF」。
 
 ### 成员画像
 
@@ -174,6 +177,8 @@ config-set scope=plugins key="new" value={ "sourceDir": "D:/github/snow-app/snow
 | `DESIGN.md` | 架构、契约、数据口径与避坑记录 |
 | `CHANGELOG.md` | 版本历史（按版本拆分） |
 | `test/helpers.test.js` | 数据层纯函数回归测试（不依赖宿主） |
+| `test/panel-mount.test.js` | 真 React 挂载、总结/画报视图与卸载回归，防止 Hook 依赖 TDZ 白屏 |
+| `package.json` / `package-lock.json` | 开发测试脚本与锁定的测试依赖，不打入运行时插件 |
 
 ### 约定
 
@@ -185,10 +190,11 @@ config-set scope=plugins key="new" value={ "sourceDir": "D:/github/snow-app/snow
 ### 测试
 
 ```bash
-node test/helpers.test.js
+npm ci
+npm run check
 ```
 
-当前 **78 passed / 0 failed**。测试只覆盖纯函数（解包、分类、时间边界、Markdown 解析、范围文案等），不触碰 React 与宿主 API。
+当前 **152 项纯函数测试 + 真 React 挂载测试**。后者实际执行初始化、effect、总结/画报视图渲染和卸载；语法检查无法发现 `useCallback` 依赖数组的前向引用（TDZ），所以不能只跑 `node --check`。React / jsdom 仅为开发测试依赖，运行面板仍使用宿主提供的 React。
 
 ### 发版
 

@@ -1,0 +1,15 @@
+{
+  "name": "snow-wechat-panel",
+  "version": "0.32.28",
+  "private": true,
+  "description": "Snow App 微信群聊信息流、统计、分析与离线画报面板",
+  "scripts": {
+    "test": "node test/helpers.test.js && node test/panel-mount.test.js",
+    "check": "node --check index.js && npm test"
+  },
+  "devDependencies": {
+    "jsdom": "^28.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}

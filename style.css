@@ -115,6 +115,10 @@
   color: var(--swf-dim);
   background: var(--swf-active);
 }
+.swf-badge-error {
+  color: var(--swf-red, #d44);
+  background: rgba(220, 70, 70, 0.1);
+}
 .swf-dot {
   width: 6px;
   height: 6px;

@@ -187,11 +187,47 @@ function lastJsonObject(text) {
       ① 带完整结构化数据的那条（成稿的强特征：<<<AI_JSON>>> / ```json 围栏 / 可解析对象）
       ② 否则取正文最长的一条（中间过程通常很短）
       ③ 都没有时退回最后一条 */
+function aiFailureMessage(data) {
+  if (!data || typeof data !== "object") return "";
+  const items = Array.isArray(data.items) ? data.items : [];
+  // 失败终态属于整条消息，不属于选中的「最长正文」。开场白可能仍是最长文本，
+  // 但不能因此遮住最后一条 429 / 5xx 的 failed 状态。
+  for (let i = items.length - 1; i >= 0; i--) {
+    const m = items[i];
+    if (!m || m.role !== "assistant") continue;
+    const status = String(m.status || "").toLowerCase();
+    if (status !== "failed" && status !== "error" && status !== "cancelled") continue;
+    if (status === "cancelled") return "分析已中止";
+    // content 常只是「已读了哪些资料」的失败占位，真正的 HTTP 错误还可能在 retryError。
+    // 全部拼接再分类，不能因为正文非空就丢掉 429 / 超时信号。
+    const textOf = (v) => {
+      if (v === undefined || v === null || v === "") return "";
+      if (typeof v === "string") return v;
+      try { return JSON.stringify(v); } catch (err) { return String(v); }
+    };
+    const explicitDetail = [m.errorMessage, m.error, m.retryError, m.retry_error, m.interruptionReason, m.interruption_reason]
+      .map(textOf).filter(Boolean).join(" ").trim();
+    const detail = (explicitDetail + " " + String(m.content || "")).trim();
+    if (/(?:^|\D)429(?:\D|$)|rate.?limit|too many requests|请求(?:过于)?频繁|限流/i.test(detail)) {
+      return "模型请求被限流（429）：本轮未完成，请稍后重试；也可减少并发或更换 API 通道";
+    }
+    if (/(?:^|\D)(500|502|503|504|529)(?:\D|$)|timeout|timed out|network|fetch failed|overloaded/i.test(detail)) {
+      return "模型服务暂时不可用或响应超时：本轮未完成，请稍后重试";
+    }
+    // 宿主有时只落 status=failed + 草稿正文，不保留上游错误码；不能把长草稿当错误详情刷满侧栏。
+    return explicitDetail ? "分析失败：" + explicitDetail.slice(0, 500) : "模型响应失败：本轮未完成，请稍后重试；可打开会话查看失败前草稿";
+  }
+  return "";
+}
+
 function readAiMessage(data) {
   if (!data || typeof data !== "object") return null;
   const items = Array.isArray(data.items) ? data.items : [];
   const assistants = items.filter((m) => m && m.role === "assistant");
-  if (!assistants.length) return null; // 还没产出 assistant 消息
+  if (!assistants.length) {
+    const failureWithoutContent = aiFailureMessage(data);
+    return failureWithoutContent ? { text: "", error: failureWithoutContent, retryable: /429|暂时不可用|响应失败/.test(failureWithoutContent), done: false } : null;
+  }
 
   const scored = assistants.map((m) => {
     const text = String(m.content || "");
@@ -221,9 +257,12 @@ function readAiMessage(data) {
   //      早期实现用它判完成，第一次轮询就误判「已完成」并停掉轮询（见下方 applyAiPayload 上方注释）。
   // 模型真没按契约输出时，由 10 分钟轮询超时收口并提示「可点『打开会话』」。
   const done = !!text && pick.hasJson;
+  const error = aiFailureMessage(data);
   return {
     text: text,
     status: status,
+    error: done ? "" : error,
+retryable: !done && /429|暂时不可用|响应失败/.test(error),
     hasJson: pick.hasJson,
     // 全文都还是空、但某条带了工具调用 = Agent 正在调工具（区别于「什么都没开始」）
     toolPending: !text && assistants.some((m) => m.toolCallsJson),
@@ -2939,6 +2978,9 @@ function editorialMetrics(stats) {
   const s = stats && typeof stats === "object" ? stats : {};
   const total = Number(s.total_messages) || 0;
   const senders = Number(s.unique_senders) || 0;
+  const sys = s.system_events && typeof s.system_events === "object" ? s.system_events : {};
+  // unique_senders 不含群自身，分子也扣掉系统侧群消息，避免与面板的人均口径分叉。
+  const groupSelf = Number(sys.group_self_messages) || 0;
   const hourly = s.hourly_distribution && typeof s.hourly_distribution === "object" ? s.hourly_distribution : {};
   let peakHour = "";
   let peak = 0;
@@ -2951,12 +2993,11 @@ function editorialMetrics(stats) {
   });
   const phrases = editorialArr(s.top_phrases);
   const topPhrase = phrases.length ? editorialTxt(phrases[0].phrase) : "";
-  const sys = s.system_events && typeof s.system_events === "object" ? s.system_events : {};
   const recallRate = Number(sys.recall_rate);
   return {
     total: total,
     senders: senders,
-    perCapita: senders ? (total / senders).toFixed(1) : "0",
+    perCapita: senders ? (Math.max(0, total - groupSelf) / senders).toFixed(1) : "0",
     peakHour: peakHour,
     peakCount: peak,
     topPhrase: topPhrase,
@@ -2996,7 +3037,10 @@ function issueHeadlineLines(text, cap) {
     }
   });
   if (cur.trim()) lines.push(cur.trim());
-  return lines.filter(Boolean).slice(0, 4);
+  const clean = lines.filter(Boolean);
+  // 极端长标题也不能截字：四行后剩余内容并回最后一行，由 CSS 缩小字号。
+  if (clean.length > 4) clean[3] = clean.slice(3).join("");
+  return clean.slice(0, 4);
 }
 
 /** 把编辑部分析结果 + 统计基线归一成两套模板都能吃的版面数据。
@@ -3192,16 +3236,17 @@ function buildArtIssueHtml(opts) {
     : escHtml(d.headline);
 
   const metricCards = [
-    ["消息", fmtNum(m.total)],
-    ["发言者", fmtNum(m.senders)],
-    ["人均", m.perCapita],
-    ["峰值", m.peakHour ? m.peakHour + ":00" : "—"],
+    ["消息", fmtNum(m.total), "本范围收录总量", "01 / VOLUME"],
+    ["发言者", fmtNum(m.senders), "实际参与讨论的人", "02 / VOICES"],
+    ["人均", m.perCapita, "扣除群系统消息", "03 / AVERAGE"],
+    ["峰值", m.peakHour ? m.peakHour + ":00" : "—", m.peakHour ? "最高 " + fmtNum(m.peakCount) + " 条 / 小时" : "暂无小时分布", "04 / PEAK"],
   ]
     .map(
       (x, i) =>
         '<div class="metric reveal" style="--d:' + i * 90 + 'ms">' +
         '<div class="metric-k">' + escHtml(x[0]) + "</div>" +
-        '<div class="metric-v" data-count="' + escHtml(String(x[1])) + '">' + escHtml(x[1]) + "</div>" +
+        '<div class="metric-v">' + escHtml(x[1]) + "</div>" +
+        '<div class="metric-note">' + escHtml(x[2]) + '</div><div class="metric-index">' + escHtml(x[3]) + "</div>" +
         "</div>",
     )
     .join("");
@@ -3254,32 +3299,52 @@ function buildArtIssueHtml(opts) {
     )
     .join("");
 
+  const sectionHead = (index, zh, en) => '<div class="chapter-head reveal"><span>' + index + ' / ' + en + '</span><h2>' + zh + '</h2><i></i></div>';
   const css = `
 :root{--bg:#07080b;--ink:#f4f1ea;--muted:#a8a294;--line:rgba(244,241,234,.16);--accent:#d8b25e;--accent2:#7c5cff;--paper:rgba(255,255,255,.04);--serif:"Songti SC","Noto Serif CJK SC","Source Han Serif SC",Georgia,serif;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
 html[data-skin="riso"]{--bg:#f3e7d6;--ink:#1c1a17;--muted:#6d6155;--line:rgba(28,26,23,.22);--accent:#e8442e;--accent2:#2a6fdb;--paper:rgba(28,26,23,.045)}
 html[data-skin="gallery"]{--bg:#f6f6f2;--ink:#101010;--muted:#6b6b66;--line:rgba(16,16,16,.18);--accent:#101010;--accent2:#e4572e;--paper:rgba(16,16,16,.035)}
 html[data-skin="cyber"]{--bg:#050510;--ink:#dff8ff;--muted:#7f9bb0;--line:rgba(0,240,255,.22);--accent:#00f0ff;--accent2:#ff2bd6;--paper:rgba(0,240,255,.05)}
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
+html{scroll-behavior:smooth;scroll-padding-top:70px}
+button,a{-webkit-tap-highlight-color:transparent}
+button{font:inherit}
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:5px}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;overflow-x:hidden}
 #dust{position:fixed;inset:0;width:100%;height:100%;z-index:0;opacity:.55;pointer-events:none}
 .grain{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.5;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.22'/%3E%3C/svg%3E")}
 .progress{position:fixed;top:0;left:0;right:0;height:2px;z-index:9;background:transparent}
 .progress i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2))}
 main{position:relative;z-index:2}
-.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:14vh 8vw 10vh;position:relative;isolation:isolate}
-.hero:before{content:"";position:absolute;inset:-20% -10% 20%;background:radial-gradient(60% 55% at 62% 22%,color-mix(in srgb,var(--accent) 20%,transparent),transparent 70%),radial-gradient(45% 40% at 20% 70%,color-mix(in srgb,var(--accent2) 16%,transparent),transparent 72%);filter:blur(10px);z-index:-1}
+.reader-nav{position:fixed;z-index:8;top:18px;left:4vw;right:4vw;display:flex;align-items:center;justify-content:space-between;gap:16px;pointer-events:none;font-size:11px}
+.reader-brand,.reader-links,.motion-toggle{pointer-events:auto;background:var(--bg);border:1px solid var(--line)}
+.reader-brand{padding:8px 11px;color:var(--muted);letter-spacing:.08em;max-width:30vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reader-links{display:flex;align-items:center;padding:3px}
+.reader-links a,.motion-toggle{color:var(--muted);text-decoration:none;padding:7px 10px;border:0;background:transparent;cursor:pointer;white-space:nowrap}
+.reader-links a:hover,.motion-toggle:hover{color:var(--ink);background:var(--paper)}
+.motion-toggle{margin-left:3px;border-left:1px solid var(--line)}
+.hero{min-height:100svh;display:flex;flex-direction:column;justify-content:center;padding:15vh 8vw 9vh;position:relative;isolation:isolate}
+.hero-inner{max-width:1180px;width:100%;margin:auto}
+.hero:after{content:"群像 / ISSUE";position:absolute;right:5vw;bottom:8vh;writing-mode:vertical-rl;font-size:10px;letter-spacing:.35em;color:var(--muted)}
+.hero:before{content:"";position:absolute;inset:0;background:radial-gradient(60% 55% at 62% 22%,color-mix(in srgb,var(--accent) 20%,transparent),transparent 70%),radial-gradient(45% 40% at 20% 70%,color-mix(in srgb,var(--accent2) 16%,transparent),transparent 72%);filter:blur(10px);z-index:-1}
 .kicker{font-size:12px;letter-spacing:.38em;text-transform:uppercase;color:var(--accent);font-weight:700}
-h1{font-family:var(--serif);font-size:clamp(42px,8.8vw,128px);line-height:.94;letter-spacing:-.045em;margin:.25em 0 .18em;max-width:14em;text-wrap:balance}
+h1{font-family:var(--serif);font-size:clamp(42px,7.4vw,112px);line-height:1.02;letter-spacing:-.045em;margin:.32em 0 .25em;max-width:12em;text-wrap:balance;overflow-wrap:anywhere}
+h1.compact{font-size:clamp(32px,5vw,76px);line-height:1.12}
 .hl-line{display:block}
 .deck{max-width:36em;font-size:clamp(15px,1.5vw,21px);line-height:1.7;color:var(--muted);margin:0 0 2.4em}
 .byline{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;letter-spacing:.08em;color:var(--muted);border-top:1px solid var(--line);padding-top:16px;max-width:56em}
 .byline b{color:var(--ink);font-weight:600}
 .scroll-hint{margin-top:7vh;font-size:11px;letter-spacing:.24em;color:var(--muted);display:flex;align-items:center;gap:10px}
 .scroll-hint:after{content:"";width:52px;height:1px;background:linear-gradient(90deg,var(--accent),transparent)}
-section.band{padding:8vh 8vw}
+section.band{padding:8vh 8vw;max-width:1560px;margin:auto}
+.chapter-head{display:flex;align-items:baseline;gap:18px;margin-bottom:38px}
+.chapter-head span{font-size:10px;letter-spacing:.16em;color:var(--accent);white-space:nowrap}
+.chapter-head h2{font-family:var(--serif);font-size:clamp(22px,2.2vw,30px);font-weight:500;margin:0;white-space:nowrap}
+.chapter-head i{height:1px;flex:1;background:var(--line)}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
-.metric{background:var(--bg);padding:26px 22px}
+.metric{background:var(--bg);padding:26px 22px;position:relative;min-width:0}
+.metric-note{font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5}
+.metric-index{font-size:9px;letter-spacing:.12em;color:var(--muted);opacity:.55;margin-top:24px}
 .metric-k{font-size:10px;letter-spacing:.22em;color:var(--muted);text-transform:uppercase}
 .metric-v{font-family:var(--serif);font-size:clamp(30px,4vw,54px);line-height:1.05;margin-top:8px}
 .lead{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:5vw;align-items:start}
@@ -3292,7 +3357,7 @@ section.band{padding:8vh 8vw}
 .story-stat{display:block;margin-top:18px;font-size:12px;color:var(--muted)}
 .story-stat em{display:block;font-style:normal;font-size:10px;letter-spacing:.12em;margin-top:4px}
 .story-main h2{font-family:var(--serif);font-size:clamp(26px,3.2vw,44px);line-height:1.25;margin:0 0 .7em;font-weight:600}
-.story-body{font-size:15px;line-height:2;color:var(--muted);margin:0;max-width:44em;text-align:justify}
+.story-body{font-size:16px;line-height:1.95;color:var(--muted);margin:0;max-width:42em;text-align:justify;overflow-wrap:anywhere}
 .story-pull{font-family:var(--serif);font-size:clamp(18px,2vw,25px);line-height:1.7;margin:1.8em 0 0;padding-left:1.2em;border-left:2px solid var(--accent);color:var(--ink)}
 .portraits{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1px;background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .portrait{margin:0;padding:28px 24px;background:var(--bg);min-height:230px}
@@ -3318,14 +3383,28 @@ section.band{padding:8vh 8vw}
 footer{padding:4vh 8vw 6vh;font-size:10px;letter-spacing:.12em;color:var(--muted);display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 .reveal{opacity:0;transform:translateY(22px);transition:opacity .9s ease,transform .9s cubic-bezier(.2,.7,.2,1);transition-delay:var(--d,0ms)}
 .reveal.in{opacity:1;transform:none}
-@media (max-width:820px){.metrics{grid-template-columns:repeat(2,1fr)}.lead,.story{grid-template-columns:1fr;gap:18px}.timeline:before{left:0}.timeline li{grid-template-columns:1fr;gap:6px}.timeline time{text-align:left}.quotes{columns:1}.hero{padding-top:12vh}}
+html[data-motion="off"]{scroll-behavior:auto}
+html[data-motion="off"] .reveal{opacity:1;transform:none;transition:none}
+html[data-motion="off"] #dust,html[data-motion="off"] .grain{display:none}
+@media (max-width:820px){.metrics{grid-template-columns:repeat(2,1fr)}.lead,.story{grid-template-columns:1fr;gap:18px}.timeline:before{left:0}.timeline li{grid-template-columns:1fr;gap:6px}.timeline time{text-align:left}.quotes{columns:1}.hero{padding-top:14vh}.reader-brand{display:none}.reader-nav{justify-content:flex-end}.hero:after{display:none}}
+@media (max-width:520px){.hero,section.band,.stories,.quotes,.closing,footer{padding-left:6vw;padding-right:6vw}.hero{padding-top:120px;padding-bottom:64px;min-height:100svh}h1{font-size:clamp(36px,11vw,56px);line-height:1.08}.deck{margin-bottom:1.6em}.byline{gap:8px 14px;font-size:11px}.scroll-hint{margin-top:38px}.reader-links a{display:none}.reader-nav{left:auto;right:6vw}.chapter-head{gap:10px;margin-bottom:24px}.chapter-head span{font-size:9px}.chapter-head h2{font-size:20px}.metric{padding:20px 16px}.metric-note{font-size:10px}.metric-index{margin-top:14px}.story{padding:36px 0}.story-no{font-size:30px}.story-body{text-align:left}.portraits{grid-template-columns:1fr}.portrait{min-height:0}.quote p{font-size:18px}.lead p{font-size:23px}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.reveal{opacity:1;transform:none;transition:none}#dust{display:none}}
-@media print{#dust,.grain,.progress,.scroll-hint{display:none}body{background:#fff;color:#000}.reveal{opacity:1;transform:none}}
+@media print{#dust,.grain,.progress,.scroll-hint,.reader-nav{display:none}body{background:#fff;color:#000}.reveal{opacity:1;transform:none}.hero{min-height:auto}.story,.portrait,.quote{break-inside:avoid}section{break-inside:auto}}
 `;
 
   const script = `
 (function(){
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var root = document.documentElement;
+  var motionOff = reduce;
+  var raf = 0;
+  var motionButton = document.querySelector('.motion-toggle');
+  function syncMotionButton(){
+    if (motionButton) {
+      motionButton.textContent = motionOff ? '开启动效' : '减弱动效';
+      motionButton.setAttribute('aria-pressed', motionOff ? 'true' : 'false');
+    }
+  }
   var els = document.querySelectorAll('.reveal');
   if (reduce || !('IntersectionObserver' in window)) {
     els.forEach(function(el){ el.classList.add('in'); });
@@ -3341,12 +3420,19 @@ footer{padding:4vh 8vw 6vh;font-size:10px;letter-spacing:.12em;color:var(--muted
     var max = h.scrollHeight - h.clientHeight;
     if (bar) bar.style.width = (max > 0 ? (h.scrollTop / max) * 100 : 0) + '%';
   }
-  window.addEventListener('scroll', onScroll, { passive: true });
+  var ticking = false;
+  window.addEventListener('scroll', function(){
+    if (!ticking) {
+      ticking = true;
+      requestAnimationFrame(function(){ onScroll(); ticking = false; });
+    }
+  }, { passive: true });
   onScroll();
-  if (reduce) return;
+  syncMotionButton();
   var c = document.getElementById('dust');
   if (!c) return;
   var ctx = c.getContext('2d');
+  if (!ctx) return;
   var dpr = Math.min(window.devicePixelRatio || 1, 2);
   var w = 0, hgt = 0, parts = [];
   function resize(){
@@ -3369,11 +3455,38 @@ footer{padding:4vh 8vw 6vh;font-size:10px;letter-spacing:.12em;color:var(--muted
       ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
       ctx.fill();
     }
-    requestAnimationFrame(frame);
+    if (!motionOff && !document.hidden) raf = requestAnimationFrame(frame);
+    else raf = 0;
   }
+  function startAnimation(){
+    if (!motionOff && !document.hidden && !raf) raf = requestAnimationFrame(frame);
+  }
+  function stopAnimation(){
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    ctx.clearRect(0, 0, w, hgt);
+  }
+  function setMotion(off){
+    motionOff = off;
+    root.setAttribute('data-motion', off ? 'off' : 'on');
+    if (off) {
+      els.forEach(function(el){ el.classList.add('in'); });
+      stopAnimation();
+    } else {
+      resize();
+      startAnimation();
+    }
+    syncMotionButton();
+  }
+  if (motionButton) motionButton.addEventListener('click', function(){ setMotion(!motionOff); });
+  document.addEventListener('visibilitychange', function(){
+    if (document.hidden) stopAnimation();
+    else startAnimation();
+  });
   resize();
   window.addEventListener('resize', resize);
-  requestAnimationFrame(frame);
+  if (reduce) setMotion(true);
+  else startAnimation();
 })();
 `;
 
@@ -3382,19 +3495,22 @@ footer{padding:4vh 8vw 6vh;font-size:10px;letter-spacing:.12em;color:var(--muted
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
     "<title>" + title + "</title><style>" + css + "</style></head><body>" +
     '<canvas id="dust" aria-hidden="true"></canvas><div class="grain" aria-hidden="true"></div>' +
-    '<div class="progress"><i></i></div><main>' +
-    '<header class="hero">' +
+    '<div class="progress" aria-hidden="true"><i></i></div>' +
+    '<nav class="reader-nav" aria-label="画报章节"><span class="reader-brand">' + escHtml(d.title) + ' / ' + escHtml(d.periodLabel) + '</span><div class="reader-links"><a href="#stories">纪事</a>' +
+    (charsHtml ? '<a href="#people">人物</a>' : '') + (timelineHtml ? '<a href="#timeline">时间线</a>' : '') + (quotesHtml ? '<a href="#quotes">金句</a>' : '') +
+    '<button class="motion-toggle" type="button" aria-pressed="false">减弱动效</button></div></nav><main>' +
+    '<header class="hero"><div class="hero-inner">' +
     '<div class="kicker">' + escHtml(d.kicker) + "</div>" +
-    "<h1>" + headlineHtml + "</h1>" +
+    '<h1 id="issue-title"' + (Array.from(d.headline).length > 28 ? ' class="compact"' : '') + '>' + headlineHtml + "</h1>" +
     (d.deck ? '<p class="deck">' + escHtml(d.deck) + "</p>" : "") +
     '<div class="byline"><span><b>' + escHtml(d.title) + "</b></span><span>" + escHtml(d.rangeLabel) + "</span><span>" + escHtml(d.periodLabel) + "</span></div>" +
-    '<div class="scroll-hint">向下滚动</div></header>' +
-    '<section class="band"><div class="metrics">' + metricCards + "</div></section>" +
-    '<section class="band"><div class="lead"><div class="lead-label">导语</div><p>' + escHtml(d.lead) + "</p></div></section>" +
-    '<section class="stories">' + sectionsHtml + "</section>" +
-    (charsHtml ? '<section class="band"><div class="lead-label" style="margin-bottom:2em">人物</div><div class="portraits">' + charsHtml + "</div></section>" : "") +
-    (timelineHtml ? '<section class="band"><div class="lead-label" style="margin-bottom:2em">时间线</div><ul class="timeline">' + timelineHtml + "</ul></section>" : "") +
-    (quotesHtml ? '<section class="quotes">' + quotesHtml + "</section>" : "") +
+    '<div class="scroll-hint">向下滚动</div></div></header>' +
+    '<section class="band" aria-label="关键数据"><div class="metrics">' + metricCards + "</div></section>" +
+    '<section class="band"><div class="lead"><div class="lead-label">EDITOR’S NOTE / 导语</div><p>' + escHtml(d.lead) + "</p></div></section>" +
+    '<section class="stories" id="stories">' + sectionHead("01", "本段纪事", "STORIES") + sectionsHtml + "</section>" +
+    (charsHtml ? '<section class="band" id="people">' + sectionHead("02", "人物群像", "PEOPLE") + '<div class="portraits">' + charsHtml + "</div></section>" : "") +
+    (timelineHtml ? '<section class="band" id="timeline">' + sectionHead("03", "时间切片", "TIMELINE") + '<ul class="timeline">' + timelineHtml + "</ul></section>" : "") +
+    (quotesHtml ? '<section class="band" id="quotes">' + sectionHead("04", "原话存档", "QUOTES") + '<div class="quotes">' + quotesHtml + "</div></section>" : "") +
     '<section class="closing"><p>' + escHtml(d.closing) + "</p></section>" +
     "<footer><span>由 Snow App「微信群聊」生成</span><span>" + generatedAt + "</span></footer>" +
     "</main><script>" + script + "</script></body></html>"
@@ -3418,14 +3534,18 @@ function buildNewspaperHtml(opts) {
   const masters = [
     ["消息", fmtNum(m.total)],
     ["发言者", fmtNum(m.senders)],
-    ["人均", m.perCapita],
+    ["人均发言", m.perCapita],
     ["峰值", m.peakHour ? m.peakHour + ":00" : "—"],
     ["热词", m.topPhrase || "—"],
+    ["撤回率", m.recallRate || "—"],
   ]
     .filter((x) => x[1] && x[1] !== "—")
     .map((x) => '<div class="num-item"><span>' + escHtml(x[0]) + "</span><b>" + escHtml(x[1]) + "</b></div>")
     .join("");
 
+  const leadChars = Array.from(d.lead || "");
+  const leadInitial = leadChars.shift() || "";
+  const leadRest = leadChars.join("");
   const storiesHtml = d.sections
     .map(
       (s, i) =>
@@ -3474,31 +3594,38 @@ function buildNewspaperHtml(opts) {
   const css = `
 :root{--paper:#f3ecdf;--ink:#1b1916;--muted:#5f574b;--accent:#8f1d1d;--rule:rgba(27,25,22,.55);--hair:rgba(27,25,22,.22);--serif:"Songti SC","Noto Serif CJK SC","Source Han Serif SC",Georgia,serif;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
 *{box-sizing:border-box}
-body{margin:0;background:#d8d0c2;color:var(--ink);font-family:var(--sans);padding:28px 16px 60px}
-.sheet{max-width:1180px;margin:0 auto;background:var(--paper);padding:36px 44px 30px;box-shadow:0 18px 50px rgba(0,0,0,.22);position:relative}
+body{margin:0;background:#d8d0c2;color:var(--ink);font-family:var(--sans);padding:34px 24px 60px}
+button{font:inherit}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.paper-tools{max-width:1180px;margin:0 auto 12px;display:flex;align-items:center;justify-content:space-between;gap:16px;color:#554d42;font-size:11px;letter-spacing:.06em}
+.paper-tools button{border:1px solid #766c5c;background:#eee6d8;color:#332b22;padding:8px 13px;cursor:pointer}
+.paper-tools button:hover{background:var(--paper);border-color:var(--accent);color:var(--accent)}
+.sheet{max-width:1180px;margin:0 auto;background:var(--paper);padding:40px 48px 34px;box-shadow:0 20px 50px rgba(0,0,0,.19),0 2px 4px rgba(0,0,0,.12);position:relative}
 .sheet:before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;background-image:radial-gradient(rgba(27,25,22,.055) .8px,transparent .9px);background-size:4px 4px}
 .masthead{position:relative;z-index:1;border-bottom:3px double var(--rule);padding-bottom:10px}
 .topline{display:flex;justify-content:space-between;gap:16px;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
-.masthead h1{font-family:var(--serif);font-weight:900;font-size:clamp(46px,7.4vw,92px);line-height:1;letter-spacing:.04em;text-align:center;margin:14px 0 8px}
+.masthead h1{font-family:var(--serif);font-weight:900;font-size:clamp(38px,6.6vw,82px);line-height:1.08;letter-spacing:.04em;text-align:center;margin:18px 0 10px;overflow-wrap:anywhere;text-wrap:balance}
 .masthead .sub{text-align:center;font-family:var(--serif);font-size:clamp(15px,1.6vw,20px);letter-spacing:.18em;color:var(--accent);margin-bottom:10px}
 .dateline{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;font-size:10px;letter-spacing:.12em;color:var(--muted);border-top:1px solid var(--hair);padding-top:8px}
-.front{display:grid;grid-template-columns:minmax(0,2.05fr) minmax(0,0.95fr);gap:26px;margin:26px 0 8px;align-items:start}
+.front{display:grid;grid-template-columns:minmax(0,2.05fr) minmax(0,0.95fr);gap:32px;margin:28px 0 8px;align-items:start}
 .lead{border-right:1px solid var(--hair);padding-right:26px}
 .kicker{display:inline-block;font-size:10px;letter-spacing:.2em;color:#fff;background:var(--accent);padding:4px 9px;margin-bottom:10px}
 .lead h2{font-family:var(--serif);font-size:clamp(32px,4.4vw,58px);line-height:1.16;margin:.1em 0 .35em;letter-spacing:-.01em}
 .lead h2 .hl-line{display:block}
 .deck{font-family:var(--serif);font-size:17px;line-height:1.7;color:var(--muted);margin:0 0 14px;font-style:italic}
 .lead p.drop{font-size:14.5px;line-height:1.95;margin:0;text-align:justify}
-.lead p.drop:first-letter{float:left;font-family:var(--serif);font-size:58px;line-height:.86;padding:6px 8px 0 0;color:var(--accent);font-weight:700}
+.drop-initial{float:left;font-family:var(--serif);font-size:62px;line-height:.84;padding:7px 8px 0 0;color:var(--accent);font-weight:700}
 .numbers{border-top:3px solid var(--rule);border-bottom:1px solid var(--hair)}
+.numbers:before{content:"数字速览 / AT A GLANCE";display:block;font-size:10px;letter-spacing:.15em;color:var(--accent);padding:0 0 10px}
+.numbers:after{content:"统计均来自当前时间范围 · 人均扣除群系统消息";display:block;font-size:9px;line-height:1.6;color:var(--muted);padding:10px 0}
 .num-item{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:9px 2px;border-bottom:1px dotted var(--hair)}
 .num-item:last-child{border-bottom:0}
 .num-item span{font-size:10px;letter-spacing:.16em;color:var(--muted)}
-.num-item b{font-family:var(--serif);font-size:21px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%}
+.num-item b{font-family:var(--serif);font-size:21px;overflow-wrap:anywhere;max-width:62%;text-align:right}
 .section-rule{display:flex;align-items:center;gap:12px;margin:26px 0 14px}
 .section-rule:before,.section-rule:after{content:"";flex:1;height:1px;background:var(--rule)}
 .section-rule span{font-family:var(--serif);font-size:13px;letter-spacing:.3em;white-space:nowrap}
-.columns{columns:3;column-gap:24px;column-rule:1px solid var(--hair)}
+.columns{columns:3;column-gap:28px;column-rule:1px solid var(--hair);orphans:3;widows:3}
 .story{break-inside:avoid;page-break-inside:avoid;margin:0 0 20px}
 .story h3{font-family:var(--serif);font-size:21px;line-height:1.35;margin:0 0 7px;font-weight:700}
 .story-tag{display:inline-block;font-family:var(--sans);font-size:9px;letter-spacing:.1em;color:#fff;background:var(--ink);padding:2px 5px;margin-right:6px;vertical-align:2px}
@@ -3526,25 +3653,32 @@ body{margin:0;background:#d8d0c2;color:var(--ink);font-family:var(--sans);paddin
 .letter cite{display:block;font-style:normal;font-size:10px;color:var(--muted);margin-top:5px;text-align:right}
 .closing{margin-top:22px;border-top:1px solid var(--rule);padding-top:14px;text-align:center;font-family:var(--serif);font-size:15px;line-height:1.8}
 footer{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:9px;letter-spacing:.1em;color:var(--muted);border-top:1px solid var(--hair);margin-top:18px;padding-top:8px}
-html[data-variant="extra"] .masthead h1{color:var(--accent);font-size:clamp(58px,9vw,118px)}
+html[data-variant="extra"] .masthead h1{color:var(--accent);font-size:clamp(48px,7vw,94px)}
 html[data-variant="extra"] .masthead{position:relative}
-html[data-variant="extra"] .masthead:after{content:"号外";position:absolute;right:0;top:34px;font-family:var(--serif);font-size:clamp(34px,5vw,64px);color:var(--accent);border:3px solid var(--accent);padding:2px 10px;transform:rotate(-8deg);opacity:.9}
+html[data-variant="extra"] .masthead:after{content:"号外";position:absolute;right:0;top:44px;font-family:var(--serif);font-size:clamp(26px,3.8vw,48px);color:var(--accent);border:3px solid var(--accent);padding:2px 8px;transform:rotate(-8deg);opacity:.86;pointer-events:none}
+html[data-variant="extra"] .masthead h1{padding:0 1.3em}
 html[data-variant="tabloid"] .sheet{max-width:880px;padding:26px 30px}
 html[data-variant="tabloid"] .front{grid-template-columns:1fr}
 html[data-variant="tabloid"] .lead{border-right:0;padding-right:0;border-bottom:1px solid var(--hair);padding-bottom:18px}
 html[data-variant="tabloid"] .columns{columns:2}
 html[data-variant="tabloid"] .masthead h1{font-size:clamp(42px,6vw,66px)}
-@media (max-width:880px){body{padding:12px 8px 36px}.sheet{padding:22px 20px}.front{grid-template-columns:1fr}.lead{border-right:0;padding-right:0;border-bottom:1px solid var(--hair);padding-bottom:18px}.columns{columns:1}.lower{grid-template-columns:1fr}.people{grid-template-columns:1fr}.letters{columns:1}}
+@media (max-width:880px){body{padding:12px 8px 36px}.paper-tools{margin:0 8px 10px}.paper-tools span{font-size:10px}.sheet{padding:24px 22px}.front{grid-template-columns:1fr}.lead{border-right:0;padding-right:0;border-bottom:1px solid var(--hair);padding-bottom:18px}.columns{columns:1}.lower{grid-template-columns:1fr}.people{grid-template-columns:1fr}.letters{columns:1}.masthead h1{font-size:clamp(34px,8vw,62px)}html[data-variant="extra"] .masthead h1{padding:0;font-size:clamp(36px,9vw,68px)}html[data-variant="extra"] .masthead:after{position:static;display:table;margin:6px auto 12px;transform:rotate(-4deg)}.lead p.drop{text-align:left}}
+@media (max-width:520px){.paper-tools{align-items:flex-start}.paper-tools span{max-width:55%;line-height:1.6}.paper-tools button{white-space:nowrap}.sheet{padding:22px 18px}.topline{letter-spacing:.06em}.dateline{font-size:9px;gap:6px 14px}.story p{text-align:left}.numbers:after{font-size:10px}.front{gap:22px}.columns{column-gap:20px}.section-rule span{letter-spacing:.18em}.letter p{font-size:15px}}
 @media print{
   @page{size:A4;margin:12mm}
-  body{background:#fff;padding:0}
+  body{background:#fff;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .paper-tools{display:none}
   .sheet{box-shadow:none;max-width:none;padding:0}
   .sheet:before{display:none}
   .columns{columns:2;column-gap:8mm}
   .lead h2{font-size:32pt}
   .masthead h1{font-size:44pt}
   .story,.person,.letter,.num-item{break-inside:avoid;page-break-inside:avoid}
-  .front,.lower{break-inside:avoid}
+  .front{break-inside:avoid}
+  .lower{break-inside:auto}
+  .masthead,.section-rule,.block-h{break-after:avoid;break-inside:avoid}
+  .story p,.letter p{orphans:3;widows:3}
+  html[data-variant="extra"] .masthead h1{font-size:40pt;padding:0}
   a{color:inherit;text-decoration:none}
 }
 `;
@@ -3553,8 +3687,9 @@ html[data-variant="tabloid"] .masthead h1{font-size:clamp(42px,6vw,66px)}
     "<!doctype html><html lang=\"zh-CN\" data-variant=\"" + variant + "\"><head><meta charset=\"utf-8\">" +
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
     "<title>" + pageTitle + "</title><style>" + css + "</style></head><body>" +
+    '<div class="paper-tools"><span>独立单文件 · 数据来自当前时间范围 · AI 编辑成稿</span><button type="button" onclick="window.print()">打印 / 存为 PDF</button></div>' +
     '<div class="sheet"><header class="masthead">' +
-    '<div class="topline"><span>' + escHtml(d.kicker) + "</span><span>第 " + escHtml(d.periodLabel || "—") + " 期</span></div>" +
+    '<div class="topline"><span>' + escHtml(d.kicker) + "</span><span>" + escHtml(d.periodLabel || "群聊特刊") + " · 本地编辑</span></div>" +
     "<h1>" + escHtml(d.title) + "</h1>" +
     '<div class="sub">群 聊 画 报</div>' +
     '<div class="dateline"><span>' + escHtml(d.rangeLabel) + "</span><span>" + generatedAt + "</span></div>" +
@@ -3563,15 +3698,15 @@ html[data-variant="tabloid"] .masthead h1{font-size:clamp(42px,6vw,66px)}
     '<span class="kicker">' + escHtml(d.kicker) + "</span>" +
     "<h2>" + headlineHtml + "</h2>" +
     (d.deck ? '<p class="deck">' + escHtml(d.deck) + "</p>" : "") +
-    '<p class="drop">' + escHtml(d.lead) + "</p></article>" +
+    '<p class="drop" aria-label="' + escHtml(d.lead) + '">' + (leadInitial ? '<span class="drop-initial" aria-hidden="true">' + escHtml(leadInitial) + "</span>" : "") + escHtml(leadRest) + "</p></article>" +
     '<aside class="numbers">' + masters + "</aside></section>" +
     '<div class="section-rule"><span>本段纪事</span></div>' +
     '<div class="columns">' + storiesHtml + "</div>" +
     '<div class="lower">' +
-    '<section><h4 class="block-h">人物</h4><div class="people">' + peopleHtml + "</div></section>" +
-    '<section><h4 class="block-h">大事记</h4><ul class="timeline">' + timelineHtml + "</ul></section>" +
+    '<section><h4 class="block-h">人物 · 本段角色</h4><div class="people">' + peopleHtml + "</div></section>" +
+    '<section><h4 class="block-h">大事记 · 时间切片</h4>' + (timelineHtml ? '<ul class="timeline">' + timelineHtml + "</ul>" : '<p class="muted">本段没有可确认的具体时刻。</p>') + "</section>" +
     "</div>" +
-    (quotesHtml ? '<section class="letters"><h4 class="block-h">读者来信</h4>' + quotesHtml + "</section>" : "") +
+    (quotesHtml ? '<section class="letters"><h4 class="block-h">原话存档 · 群友说</h4>' + quotesHtml + "</section>" : "") +
     '<div class="closing">' + escHtml(d.closing) + "</div>" +
     "<footer><span>由 Snow App「微信群聊」生成</span><span>数据来自本机 wechat MCP（只读）</span></footer>" +
     "</div></body></html>"
@@ -4334,6 +4469,11 @@ function WechatPanel({ api, locale }) {
   const aiScopeRef = useRef({ start: "", end: "" });
   // 当前流式目标：group = 群维度深度分析，member = 单个成员的角色分析
   const aiTargetRef = useRef("group");
+  // 瞬时故障只自动重试一次；切群 / 手动重跑 / 卸载必须使旧定时器失效。
+  const aiRetryRef = useRef({ timer: null, key: "", count: 0 });
+  const aiRetryActionRef = useRef(null);
+  const aiRunnerRef = useRef({ group: null, member: null });
+  const [aiRetrySeconds, setAiRetrySeconds] = useState(0);
   // 成员分析代次：切换/收起成员时自增，让旧请求的后续回调直接作废（避免复活订阅）
   const memberGenRef = useRef(0);
   // 上一次成员画像请求的口径（成员 + 范围）：顶栏范围一变就用新口径重取，
@@ -4380,10 +4520,19 @@ function WechatPanel({ api, locale }) {
     aiConvRef.current = "";
   }, []);
 
+  const cancelAiRetry = useCallback(() => {
+    const r = aiRetryRef.current;
+    if (r.timer) clearTimeout(r.timer);
+    aiRetryRef.current = { timer: null, key: "", count: 0 };
+    setAiRetrySeconds(0);
+  }, []);
+
   // 停止「成员」这一路的流式读取：群分析在跑时不动它（共用同一个订阅/轮询槽位）
   const stopMemberAiStream = useCallback(() => {
     memberGenRef.current += 1;
     if (aiTargetRef.current !== "member") return;
+    cancelAiRetry();
+    aiRetryActionRef.current = null;
     stopPoll();
     try {
       if (aiUnsubRef.current) aiUnsubRef.current();
@@ -4391,7 +4540,7 @@ function WechatPanel({ api, locale }) {
       /* 订阅已失效 */
     }
     aiUnsubRef.current = null;
-  }, [stopPoll]);
+  }, [stopPoll, cancelAiRetry]);
 
   // 读取 AI 分析设置：存储不可用时保持默认值，不阻塞面板
   useEffect(() => {
@@ -4837,6 +4986,8 @@ function WechatPanel({ api, locale }) {
     const prev = prevSessionRef.current;
     prevSessionRef.current = sessionId;
     if (!prev || prev === sessionId) return;
+    cancelAiRetry();
+    aiRetryActionRef.current = null;
     stopMemberAiStream();
     stopPoll();
     try {
@@ -4892,7 +5043,7 @@ function WechatPanel({ api, locale }) {
     setDeepBusy(false);
     setDeepMsg("");
     setDeepOpenStep("");
-  }, [sessionId, stopMemberAiStream, stopPoll]);
+  }, [sessionId, stopMemberAiStream, stopPoll, cancelAiRetry]);
 
   /* ---- 组件卸载：让在飞的深挖阶段作废并退订（阶段轮询最长 15 分钟，不该在后台空转） ---- */
   useEffect(
@@ -5207,7 +5358,13 @@ function WechatPanel({ api, locale }) {
       .then((saved) => {
         if (!alive || !saved || !saved.data) return;
         if (!scopeMatches(saved, rangeStart, rangeEnd, false)) return;
-        setEditorialData(saved.data);
+        setEditorialData(normalizeEditorial(saved.data, {
+          stats: statsIsFresh(statsScope, statsRange, sessionId, rangeStart, rangeEnd) ? stats : null,
+          title: (current && current.display_name) || sessionId,
+          rangeLabel: rangeStart + " ~ " + rangeEnd,
+          periodLabel: issueCtxRef.current.periodLabel,
+          avatarMap: avatars,
+        }));
         setEditorialText(String(saved.text || ""));
         setEditorialStatus("done");
         setEditorialMsg("已恢复本范围的画报内容（" + new Date(saved.at || Date.now()).toLocaleString() + "）");
@@ -5328,10 +5485,62 @@ function WechatPanel({ api, locale }) {
     else setSaveMsg(text);
   }, []);
 
+  const scheduleAiRetry = useCallback((target, reason) => {
+    const r = aiRetryRef.current;
+    const key = sessionId + ":" + rangeStart + ":" + rangeEnd + ":" + target;
+    if (r.timer) return; // 订阅 + 轮询可同时送达失败，不重复启动倒计时
+    if (r.key === key && r.count >= 1) {
+      setTargetAiStatus("error");
+      setTargetAiNote(reason + "。请点「重试分析」重新发起；自动重试最多一次。");
+      return;
+    }
+    aiRetryActionRef.current = { target: target, run: () => {
+      const run = aiRunnerRef.current[target];
+      if (run) run(true);
+    } };
+    aiRetryRef.current = { timer: null, key: key, count: r.key === key ? r.count + 1 : 1 };
+    let remain = 20;
+    setTargetAiStatus("error");
+    setAiRetrySeconds(remain);
+    setTargetAiNote(reason + "。将在 20 秒后自动重试一次，也可点「立即重试」。");
+    const tick = () => {
+      const action = aiRetryActionRef.current;
+      if (!action || action.target !== target) return;
+      remain -= 1;
+      if (remain <= 0) {
+        action.run(true);
+        return;
+      }
+      setAiRetrySeconds(remain);
+      aiRetryRef.current.timer = setTimeout(tick, 1000);
+    };
+    aiRetryRef.current.timer = setTimeout(tick, 1000);
+  }, [sessionId, rangeStart, rangeEnd, setTargetAiStatus, setTargetAiNote]);
+
+  const retryAiNow = useCallback(() => {
+    const target = (aiRetryActionRef.current && aiRetryActionRef.current.target) || aiTargetRef.current;
+    cancelAiRetry();
+    const run = aiRunnerRef.current[target];
+    if (run) run(true);
+  }, [cancelAiRetry]);
+
+  // 等待重试期间换群 / 换时间，不允许用旧闭包重跑旧口径。
+  useEffect(() => () => cancelAiRetry(), [sessionId, rangeStart, rangeEnd, cancelAiRetry]);
+  useEffect(() => {
+    if (deepBusy || editorialBusy) cancelAiRetry();
+  }, [deepBusy, editorialBusy, cancelAiRetry]);
+
   const applyAiPayload = useCallback(
     (data) => {
       const msg = readAiMessage(data);
       if (!msg) return false; // 还没产出 assistant 消息：不判完成，继续等
+      if (msg.error) {
+        // 失败是终态，不是「继续等 JSON」。否则 429 会在面板上假装跑到超时。
+        setTargetAiStatus("error");
+        if (msg.retryable) scheduleAiRetry(aiTargetRef.current, msg.error);
+        else setTargetAiNote(msg.error + "；本次结果未纳入报告。");
+        return true;
+      }
       if (!msg.text) {
         if (msg.toolPending) setTargetAi("（Agent 正在调用工具…）");
         return false;
@@ -5347,7 +5556,7 @@ function WechatPanel({ api, locale }) {
       }
       return msg.done;
     },
-    [parseAiData, setTargetAi, setTargetAiData, setTargetAiStatus, setTargetAiNote],
+    [parseAiData, setTargetAi, setTargetAiData, setTargetAiStatus, setTargetAiNote, scheduleAiRetry],
   );
 
   const startPoll = useCallback(
@@ -5444,7 +5653,12 @@ function WechatPanel({ api, locale }) {
     [api, applyAiPayload, startPoll, stopPoll],
   );
 
-  const runAi = useCallback(async () => {
+  const runAi = useCallback(async (isRetry) => {
+    cancelAiRetry();
+    if (!isRetry) aiRetryActionRef.current = null;
+    stopPoll();
+    try { if (aiUnsubRef.current) aiUnsubRef.current(); } catch (err) { /* 旧订阅已失效 */ }
+    aiUnsubRef.current = null;
     if (!sessionId) {
       setError(t.pick);
       return;
@@ -5490,7 +5704,7 @@ function WechatPanel({ api, locale }) {
       setAiStatus("error");
     }
     setAiBusy(false);
-  }, [api, current, sessionId, rangeStart, prompt, subscribeAi, t.pick, memberAiBusy, memberAiStatus, deepBusy]);
+  }, [api, current, sessionId, rangeStart, prompt, subscribeAi, stopPoll, cancelAiRetry, t.pick, memberAiBusy, memberAiStatus, deepBusy]);
 
   /* ---- 深挖流水线（阶段编排器）----
      四个阶段串行（阶段之间有强依赖），每个阶段内部由该阶段的 Agent 并行派子代理。
@@ -5551,7 +5765,8 @@ function WechatPanel({ api, locale }) {
               lastText = msg.text;
               if (onText) onText(msg.text);
             }
-            if (msg.done) finish(resolve, { convId: convId, text: msg.text, incomplete: false });
+            if (msg.error) finish(reject, new Error(msg.error));
+            else if (msg.done) finish(resolve, { convId: convId, text: msg.text, incomplete: false });
           };
           const tick = async () => {
             if (closed) return;
@@ -5908,7 +6123,7 @@ function WechatPanel({ api, locale }) {
         const label = kind === "art" ? "艺术画报-" + issueSkin : "报纸-" + paperVariant;
         const name =
           "wechat-" + safeFileName(label, "画报") + "-" + safeFileName(groupName, "wechat") + "-" +
-          rangeStart.slice(0, 10).replace(/-/g, "") + "-" + timeStamp() + ".html";
+          rangeStart.slice(0, 10).replace(/-/g, "") + "-" + fileStamp() + ".html";
         const sep = /[\\/]$/.test(root) ? "" : root.indexOf("\\") >= 0 ? "\\" : "/";
         const filePath = root + sep + name;
         const res = await api.write.run("filesystem.writeFile", { filePath: filePath, content: html });
@@ -6027,7 +6242,12 @@ function WechatPanel({ api, locale }) {
     [current, sessionId, rangeStart, rangeEnd, memberAllTime, aiSettings],
   );
 
-  const runMemberAi = useCallback(async () => {
+  const runMemberAi = useCallback(async (isRetry) => {
+    cancelAiRetry();
+    if (!isRetry) aiRetryActionRef.current = null;
+    stopPoll();
+    try { if (aiUnsubRef.current) aiUnsubRef.current(); } catch (err) { /* 旧订阅已失效 */ }
+    aiUnsubRef.current = null;
     if (!sessionId || !memberProfile || memberProfile.error) return;
     if (aiBusy || aiStatus === "streaming") {
       setMemberAiMsg("群分析正在生成，等它结束再分析成员。");
@@ -6076,7 +6296,7 @@ function WechatPanel({ api, locale }) {
       setMemberAiStatus("error");
     }
     if (memberGenRef.current === gen) setMemberAiBusy(false);
-  }, [api, sessionId, memberProfile, memberPrompt, subscribeAi, aiBusy, aiStatus, deepBusy, rangeStart, rangeEnd]);
+  }, [api, sessionId, memberProfile, memberPrompt, subscribeAi, stopPoll, cancelAiRetry, aiBusy, aiStatus, deepBusy, rangeStart, rangeEnd]);
 
   const openMemberSession = useCallback(async () => {
     if (!memberAiConvId) return;
@@ -6243,8 +6463,10 @@ function WechatPanel({ api, locale }) {
   }, [rangeStart, rangeEnd, stats, statsScope, statsRange, sessionId, aiSettings]);
 
   // 结果槽：按当前档位优先，缺则回退另一档 —— 界面与报告同源，避免「看到 A 却报告写 B」
-  const shownAiText = stripAiJson(deepMode === "deep" ? deepText || aiText : aiText || deepText);
-  const shownAiData = deepMode === "deep" ? deepData || aiData : aiData || deepData;
+  const shownAiText = stripAiJson(deepMode === "deep" ? deepText || (aiStatus === "error" ? "" : aiText) : aiStatus === "error" ? "" : aiText || deepText);
+  const shownAiData = deepMode === "deep" ? deepData || (aiStatus === "error" ? null : aiData) : aiStatus === "error" ? null : aiData || deepData;
+  // 重试调度注册在前面，真正的 run 函数在这里（声明完成后）注入，杜绝依赖数组 TDZ。
+  aiRunnerRef.current = { group: runAi, member: runMemberAi };
   // 深挖最后一个已有会话的阶段（「打开会话」用）
   const deepLastConvId = useMemo(() => {
     for (let i = deepSteps.length - 1; i >= 0; i--) {
@@ -6743,9 +6965,11 @@ function WechatPanel({ api, locale }) {
         /* 忽略 */
       }
       deepUnsubRef.current = null;
+      cancelAiRetry();
+      aiRetryActionRef.current = null;
       stopPoll();
     },
-    [stopPoll],
+    [stopPoll, cancelAiRetry],
   );
 
   /* ---- MCP 能力 ---- */
@@ -8016,6 +8240,7 @@ function WechatPanel({ api, locale }) {
               "AI 角色分析",
               memberAiStatus === "streaming" ? h("span", { className: "swf-badge" }, "生成中…") : null,
               memberAiStatus === "done" ? h("span", { className: "swf-badge" }, "已完成") : null,
+              memberAiStatus === "error" ? h("span", { className: "swf-badge swf-badge-error" }, "未完成") : null,
             ),
             h(
               "div",
@@ -8025,10 +8250,11 @@ function WechatPanel({ api, locale }) {
                 {
                   className: "swf-btn swf-btn-primary",
                   disabled: memberAiBusy || memberAiStatus === "streaming" || aiBusy || aiStatus === "streaming",
-                  onClick: runMemberAi,
+                  onClick: () => runMemberAi(false),
                 },
-                memberAiBusy || memberAiStatus === "streaming" ? t.busy : memberAiText ? "重新分析该成员" : "分析该成员",
+                memberAiBusy || memberAiStatus === "streaming" ? t.busy : memberAiStatus === "error" ? "重试该成员分析" : memberAiText ? "重新分析该成员" : "分析该成员",
               ),
+              memberAiStatus === "error" ? h("button", { className: "swf-btn", onClick: retryAiNow }, "立即重试") : null,
               memberAiConvId ? h("button", { className: "swf-btn", onClick: openMemberSession }, t.open) : null,
             memberAiText ? h("button", { className: "swf-btn", onClick: copyMemberAi }, "复制正文") : null,
             memberMd ? h("button", { className: "swf-btn", onClick: saveMemberMd }, "导出 MD") : null,
@@ -8037,7 +8263,7 @@ function WechatPanel({ api, locale }) {
               : null,
           ),
           memberAiBusy ? h("div", { className: "swf-note" }, "Agent 正在读该成员的近期发言…") : null,
-          memberAiMsg ? h("div", { className: "swf-note" }, memberAiMsg) : null,
+          memberAiMsg ? h("div", { className: memberAiStatus === "error" ? "swf-error" : "swf-note" }, memberAiMsg) : null,
           memberMsg ? h("div", { className: "swf-note" }, memberMsg) : null,
             memberAiData && memberAiData.persona
               ? h(
@@ -8270,7 +8496,8 @@ function WechatPanel({ api, locale }) {
         { className: "swf-section" },
         "AI 分析",
         aiStatus === "streaming" || deepBusy ? h("span", { className: "swf-badge" }, "生成中…") : null,
-        !deepBusy && !(aiStatus === "streaming") && shownAiText ? h("span", { className: "swf-badge" }, "已完成") : null,
+        aiStatus === "error" && !deepBusy ? h("span", { className: "swf-badge swf-badge-error" }, aiRetrySeconds ? "等待重试" : "未完成") : null,
+        !deepBusy && !(aiStatus === "streaming") && aiStatus !== "error" && shownAiText ? h("span", { className: "swf-badge" }, "已完成") : null,
       ),
       h(
         "div",
@@ -8390,9 +8617,9 @@ function WechatPanel({ api, locale }) {
               {
                 className: "swf-btn swf-btn-primary",
                 disabled: aiBusy || aiStatus === "streaming" || deepBusy || !sessionId,
-                onClick: runAi,
+                onClick: () => runAi(false),
               },
-              aiBusy || aiStatus === "streaming" ? t.busy : aiText ? "重新分析" : "单会话分析",
+              aiBusy || aiStatus === "streaming" ? t.busy : aiStatus === "error" ? "重试分析" : aiText ? "重新分析" : "单会话分析",
             ),
         deepBusy ? h("button", { className: "swf-btn", onClick: stopDeep }, "中止深挖") : null,
         (deepMode === "deep" ? deepLastConvId : aiConvId)
@@ -8404,7 +8631,12 @@ function WechatPanel({ api, locale }) {
           : null,
       ),
       deepMsg ? h("div", { className: "swf-note" }, deepMsg) : null,
-      saveMsg ? h("div", { className: "swf-note" }, saveMsg) : null,
+      saveMsg ? h("div", { className: aiStatus === "error" ? "swf-error" : "swf-note" }, saveMsg) : null,
+      aiStatus === "error" && deepMode !== "deep"
+        ? h("div", { className: "swf-actions" },
+            h("button", { className: "swf-btn", disabled: aiBusy || deepBusy, onClick: retryAiNow }, aiRetrySeconds ? "立即重试（自动倒计时 " + aiRetrySeconds + "s）" : "立即重试"),
+            aiRetrySeconds ? h("button", { className: "swf-btn", onClick: cancelAiRetry }, "取消自动重试") : null)
+        : null,
 
       // （结果与操作按钮已并入上方「AI 分析」区块：档位决定跑哪条管线，结果按档位优先展示）
 

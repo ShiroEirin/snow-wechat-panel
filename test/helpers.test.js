@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -165,6 +165,27 @@ ok(
   ]).text === "长得多的一段正文，用来代表成稿",
 );
 ok("全部为空但有工具调用 -> 仍判 toolPending", multi([{ role: "assistant", content: "", toolCallsJson: "[]" }]).toolPending === true);
+
+console.log("AI 失败终态 / 受控重试");
+const rateLimited = multi([
+  opening,
+  { role: "assistant", content: "HTTP 429: too many requests", status: "failed" },
+]);
+ok("429 是失败终态而不是处理中", !!rateLimited.error && rateLimited.retryable === true && rateLimited.done === false);
+ok("429 不被开场白或工具状态遮住", /429/.test(rateLimited.error));
+ok("限流提示明确本轮未完成", /未完成/.test(rateLimited.error));
+const serverFailed = multi([{ role: "assistant", content: "503 Service Unavailable", status: "failed" }]);
+ok("5xx 同样立即收口且可重试", serverFailed.retryable === true && /暂时不可用/.test(serverFailed.error));
+ok("真实会话：失败正文含引用/代码时仍可识别 429", multi([{ role: "assistant", content: "已读取一些内容\n> [TIP] x\n```text\nHTTP 429 rate limit\n```", status: "failed", recoveryOutcome: "non_retriable" }]).retryable === true);
+ok("失败正文非空也不会遮住 retryError 的 429", multi([{ role: "assistant", content: "已读取一些群聊材料", status: "failed", retryError: "HTTP 429 Too Many Requests" }]).retryable === true);
+ok("真实失败草稿不刷满侧栏且仍可受控重试", multi([{ role: "assistant", content: "失败前的长草稿".repeat(200), status: "failed" }]).retryable === true && multi([{ role: "assistant", content: "失败前的长草稿".repeat(200), status: "failed" }]).error.length < 100);
+ok("主动中止不是可自动重试故障", multi([{ role: "assistant", content: "", status: "cancelled" }]).retryable === false);
+ok("没有 assistant 内容也不抛异常", lib.readAiMessage({ items: [] }) === null);
+ok("普通 completed 开场白不误判为失败", !multi([opening]).error);
+const aiUiSource = src.slice(src.indexOf("const scheduleAiRetry ="), src.indexOf("const runOneTurn ="));
+ok("失败会进入 error 而非 streaming", aiUiSource.indexOf('setTargetAiStatus("error")') >= 0);
+ok("429 延迟重试且限制一次", aiUiSource.indexOf("count >= 1") >= 0 && aiUiSource.indexOf("setTimeout(tick, 1000)") >= 0);
+ok("runOneTurn 失败会 reject 终止流水线", src.indexOf("if (msg.error) finish(reject, new Error(msg.error))") >= 0);
 
 console.log("mdStatus（状态行自动上色）");
 ok("✅ 识别为 ok", lib.mdStatusOf("✅ 三条结论").kind === "ok");
@@ -372,7 +393,10 @@ const headLines = lib.issueHeadlineLines("一群人，把深夜调成了工作�
 ok("标题按词分行且不丢字", headLines.join("") === "一群人，把深夜调成了工作台");
 ok("标题不出现单字掉行", headLines.length === 2 && headLines[1] !== "台");
 const longLines = lib.issueHeadlineLines("这一条特别长的标题用来确认分行不会把词拆开也不会超过四行", 11.5);
-ok("超长标题最多四行", longLines.length <= 4 && longLines.length >= 2);
+ok("超长标题最多四行且不丢字", longLines.length <= 4 && longLines.length >= 2 && longLines.join("") === "这一条特别长的标题用来确认分行不会把词拆开也不会超过四行");
+ok("导出时间戳精确到秒", /^\d{8}-\d{6}$/.test(lib.fileStamp(new Date(2026, 9, 25, 3, 4, 5))));
+const perCapitaMetrics = lib.editorialMetrics({ total_messages: 100, unique_senders: 4, system_events: { group_self_messages: 20 } });
+ok("人均分子扣除群系统消息", perCapitaMetrics.perCapita === "20.0");
 
 const fallbackIssue = lib.normalizeEditorial(null, {
   stats: issueStats,
@@ -420,6 +444,10 @@ ok("艺术画报是完整 HTML", artHtml.indexOf("<!doctype html>") === 0 && art
 ok("艺术画报带皮肤与动效", artHtml.indexOf('data-skin="noir"') >= 0 && artHtml.indexOf("IntersectionObserver") >= 0);
 ok("艺术画报转义脚本注入", artHtml.indexOf("<script>alert(1)</script>") < 0 && artHtml.indexOf("&lt;script&gt;") >= 0);
 ok("艺术画报无外链资源", artHtml.indexOf('src="http') < 0 && artHtml.indexOf("<link") < 0);
+ok("艺术画报有章节导航与动效开关", artHtml.indexOf('aria-label="画报章节"') >= 0 && artHtml.indexOf("motion-toggle") >= 0);
+ok("后台标签页暂停动画且进度按帧更新", artHtml.indexOf("visibilitychange") >= 0 && artHtml.indexOf("cancelAnimationFrame") >= 0);
+ok("画报导出不会同日同秒覆盖", src.indexOf('rangeStart.slice(0, 10).replace(/-/g, "") + "-" + fileStamp() + ".html"') >= 0);
+ok("429 等待重试不会显示处理中", src.indexOf('aiRetrySeconds ? "等待重试" : "未完成"') >= 0);
 
 const paperHtml = lib.buildNewspaperHtml({
   aiData: fallbackIssue,
@@ -432,7 +460,9 @@ const paperHtml = lib.buildNewspaperHtml({
 });
 ok("报纸画报是完整 HTML", paperHtml.indexOf("<!doctype html>") === 0 && paperHtml.indexOf("</html>") > 0);
 ok("报纸画报带版式与打印样式", paperHtml.indexOf('data-variant="extra"') >= 0 && paperHtml.indexOf("@media print") >= 0);
-ok("报纸画报包含分栏与首字下沉", paperHtml.indexOf("columns:3") >= 0 && paperHtml.indexOf("first-letter") >= 0);
+ok("报纸画报包含分栏与首字下沉", paperHtml.indexOf("columns:3") >= 0 && paperHtml.indexOf("drop-initial") >= 0);
+ok("报纸有打印入口与数据口径", paperHtml.indexOf("window.print()") >= 0 && paperHtml.indexOf("人均扣除群系统消息") >= 0);
+ok("报纸保留完整导语与无可访问性重复首字", paperHtml.indexOf('aria-label="' + fallbackIssue.lead + '"') >= 0 && paperHtml.indexOf('aria-hidden="true"') >= 0);
 ok("报纸画报无外链资源", paperHtml.indexOf('src="http') < 0 && paperHtml.indexOf("<link") < 0);
 
 console.log("");
