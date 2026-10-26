@@ -3,6 +3,21 @@
 > 本文件由原 README 的「演进摘要」按版本拆分而来，保留全部原始记录，仅做分段与标题整理。
 > 每个版本的发布资产见 [Releases](https://github.com/ShiroEirin/snow-wechat-panel/releases)。
 
+## v0.32.30
+
+**v0.32.29 的复审补丁 —— 同一条「等结果」链路，补四处边界。**
+
+用真实数据（`status` / `recoveryOutcome` 的实际取值分布）和宿主文档逐条核对后补的：
+
+① **`non_retriable` 不再盲目自动重试** —— 真实失败消息常同时带 429 正文与 `recoveryOutcome=non_retriable`。现按优先级判断：429 / 限流 / 5xx / 网络超时是**瞬时故障**，仍允许一次受控重试；其余 `non_retriable`（额度耗尽 / 内容被拒）直接收口，不再浪费一次调用。
+② **`incomplete` / `partial_threshold` 也算终态** —— 数据库里确实存在这种「只完成一部分」的消息（此前不识别，白等满 10 分钟）。现在立刻收口并说明「内容可能不完整」；正文为空时同样成立（原先被 `if (!msg.text) return false` 提前拦住）。
+③ **停滞阈值 3 → 5 分钟** —— Agent 可能调 `sync_wechat_database` 阻塞 1–3 分钟，期间会话没有任何新消息，3 分钟会把正常同步误判成停滞。连续读失败上限同步放宽到 15 次（30 秒），订阅间隔放宽到 5 秒避免双通道重复读。
+④ **深挖 / 编辑部管线同步修复** —— 它们复用 `runOneTurn`：订阅补 `intervalMs`，并把 `partial` 作为阶段终态（否则白等阶段超时）。
+⑤ **`resolveDirectoryId` 加 5 秒总超时** —— 依次读 4 个元数据域，任何一个挂起都会让「创建会话」永远停住，面板就停在「处理中…」。
+
+另外新增 `.prettierignore` 忽略 `index.js`：这个 9000+ 行的单文件从未按 Prettier 默认风格排版，自动格式化会产生 4000+ 行纯格式 diff，把真实改动埋掉。
+
+测试 157 → **166 passed**（新增：non_retriable 不重试 / 429 仍可重试 / cancelled 不可重试 / 无 outcome 按文案 / incomplete 与 partial_threshold / 普通 completed / snake_case / 空正文 partial）。
 ## v0.32.29
 
 **修「AI 分析卡在生成中、无法重新分析」**（用户实测：会话已经弹出「响应失败」，面板却永远停在「处理中…」）。

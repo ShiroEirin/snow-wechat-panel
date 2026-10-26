@@ -6,7 +6,7 @@ Snow App 插件（ESM 面板）。数据全部来自本机已安装的 **wechat 
 
 | 版本 | 许可 | 依赖 |
 | --- | --- | --- |
-| `0.32.29` | MIT | Snow App ≥ 0.4.27 + wechat MCP |
+| `0.32.30` | MIT | Snow App ≥ 0.4.27 + wechat MCP |
 
 ---
 
@@ -194,7 +194,7 @@ npm ci
 npm run check
 ```
 
-当前 **152 项纯函数测试 + 真 React 挂载测试**。后者实际执行初始化、effect、总结/画报视图渲染和卸载；语法检查无法发现 `useCallback` 依赖数组的前向引用（TDZ），所以不能只跑 `node --check`。React / jsdom 仅为开发测试依赖，运行面板仍使用宿主提供的 React。
+当前 **166 项纯函数测试 + 真 React 挂载测试**。后者实际执行初始化、effect、总结/画报视图渲染和卸载；语法检查无法发现 `useCallback` 依赖数组的前向引用（TDZ），所以不能只跑 `node --check`。React / jsdom 仅为开发测试依赖，运行面板仍使用宿主提供的 React。
 
 ### 发版
 

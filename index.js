@@ -26,15 +26,18 @@ const AI_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const AI_POLL_INTERVAL_MS = 2000;
 // messages 不是 live 域：subscribe 不传 intervalMs 只会推一次初值（宿主文档明确），
 // 那样「实时通道」等于只在建会话那一刻推一次，后续更新全靠轮询。
-const AI_SUB_INTERVAL_MS = 2000;
+// 既然非 live 域的订阅本质也是定时拉取，间隔比轮询放宽一档，避免双通道重复读。
+const AI_SUB_INTERVAL_MS = 5000;
 // 订阅返回 Promise<{unsubscribe}>；个别情况下迟迟不 resolve 时不能让它卡住
 // 「处理中…」与轮询兜底，最多等这么久就放弃订阅、只用轮询。
 const AI_SUB_TIMEOUT_MS = 5000;
 // 停滞看门狗：连续这么久没有任何新消息 / 字数增长，判定本轮已卡住
 //（API 断开但宿主没落 failed 消息时，不能一直「生成中」等满 10 分钟）。
-const AI_STALL_MS = 3 * 60 * 1000;
-// 轮询连续读取失败上限（10 × 2s = 20s）：读通道断了也要明确收口。
-const AI_POLL_FAIL_LIMIT = 10;
+// 必须大于「单次工具调用的最长耗时」：Agent 可能调 sync_wechat_database（1–3 分钟），
+// 期间会话没有任何新消息，3 分钟会把正常同步误判成停滞。
+const AI_STALL_MS = 5 * 60 * 1000;
+// 轮询连续读取失败上限（15 × 2s = 30s）：读通道断了也要明确收口。
+const AI_POLL_FAIL_LIMIT = 15;
 // 同步成功的提示 3 秒后淡出（与 style.css 的 .swf-syncmsg-ok 动画时长对齐）
 const SYNC_OK_FADE_MS = 3000;
 // 成员检索结果分页：MCP 的 list_chatroom_members 没有 offset（服务端分页不存在），
@@ -275,10 +278,13 @@ function readAiMessage(data) {
     text: text,
     status: status,
     error: done ? "" : error,
-retryable: !done && /429|暂时不可用|响应失败/.test(error),
+    retryable: !done && aiFailureRetryable(data, error),
     hasJson: pick.hasJson,
     // 全文都还是空、但某条带了工具调用 = Agent 正在调工具（区别于「什么都没开始」）
     toolPending: !text && assistants.some((m) => m.toolCallsJson),
+    // 部分完成：宿主用 status=incomplete + recoveryOutcome=partial_threshold 表示
+    // 「本轮只做了一部分」。它不是失败，但也不能一直等 —— 必须收口并说明内容不完整。
+    partial: !done && aiPartialOutcome(pick.msg),
     done: done,
   };
 }
@@ -294,6 +300,40 @@ function aiProgressSig(items) {
     chars += String((m && m.content) || "").length + String((m && m.thinking) || "").length;
   }
   return list.length + ":" + chars;
+}
+
+/** 宿主把「只完成一部分」标成 status=incomplete / recoveryOutcome=partial_threshold。 */
+function aiPartialOutcome(m) {
+  if (!m) return false;
+  const status = String(m.status || "").toLowerCase();
+  const outcome = String(m.recoveryOutcome || m.recovery_outcome || "").toLowerCase();
+  return status === "incomplete" || outcome === "partial_threshold";
+}
+
+/** 失败是否值得自动重试：
+    ① 429 / 限流 / 5xx / 网络超时是**瞬时故障** —— 即使宿主标了 non_retriable，也允许受控重试一次
+       （实测：真实失败消息常常同时带 429 正文与 non_retriable，这时重试是有意义的）；
+    ② 其余情况若宿主明确 non_retriable（额度耗尽 / 内容被拒），不再自动重试。 */
+function aiFailureRetryable(data, error) {
+  if (
+    /429|rate.?limit|too many requests|请求(?:过于)?频繁|限流|(?:^|\D)(500|502|503|504|529)(?:\D|$)|timeout|timed out|network|fetch failed|overloaded/i.test(
+      error,
+    )
+  ) {
+    return true;
+  }
+  const items = data && Array.isArray(data.items) ? data.items : [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    const m = items[i];
+    if (!m || m.role !== "assistant") continue;
+    const st = String(m.status || "").toLowerCase();
+    if (st !== "failed" && st !== "error" && st !== "cancelled") continue;
+    const outcome = String(m.recoveryOutcome || m.recovery_outcome || "").toLowerCase();
+    if (outcome.indexOf("non") === 0) return false; // non_retriable / non-retriable
+    break;
+  }
+  // 通用失败文案（含「响应失败」「暂时不可用」）仍允许一次受控重试
+  return /响应失败|暂时不可用/.test(error);
 }
 
 /** 深挖的「视角」：每个视角一个子代理，按分析维度开关裁剪（关掉的维度不跑，省 token）。 */
@@ -3832,10 +3872,18 @@ async function resolveDirectoryId(api) {
     }
     return "";
   };
+  // 兜底上限：任何一个域迟迟不返回时，不能让「创建会话」这一步永远停住
+  //（面板会一直「处理中…」）。宁可退回「无目录」，也不卡死。
+  const deadline = Date.now() + 5000;
   for (const domain of ["runtime", "projects", "workspace", "app"]) {
+    const left = deadline - Date.now();
+    if (left <= 0) break;
     let resp = null;
     try {
-      resp = await api.metadata.get(domain);
+      resp = await Promise.race([
+        api.metadata.get(domain),
+        new Promise((resolve) => setTimeout(() => resolve(null), left)),
+      ]);
     } catch (err) {
       continue;
     }
@@ -5568,6 +5616,12 @@ function WechatPanel({ api, locale }) {
         return true;
       }
       if (!msg.text) {
+        // 部分完成且没有正文：同样是终态，不能因为「正文为空」就继续等
+        if (msg.partial) {
+          setTargetAiStatus("done");
+          setTargetAiNote("本轮只完成了一部分（宿主标记为 incomplete），且没有可用的正文：可点「重新分析」重跑。");
+          return true;
+        }
         if (msg.toolPending) setTargetAi("（Agent 正在调用工具…）");
         return false;
       }
@@ -5579,8 +5633,15 @@ function WechatPanel({ api, locale }) {
         if (!msg.hasJson) {
           setTargetAiNote("已结束，但未解析到结构化数据块：图表可能为空，可点「打开会话」查看完整正文。");
         }
+        return true;
       }
-      return msg.done;
+      // 部分完成（incomplete / partial_threshold）：收口，但不把半截正文说成完整结果
+      if (msg.partial) {
+        setTargetAiStatus("done");
+        setTargetAiNote("本轮只完成了一部分（宿主标记为 incomplete）：内容可能不完整，可点「重新分析」重跑。");
+        return true;
+      }
+      return false;
     },
     [parseAiData, setTargetAi, setTargetAiData, setTargetAiStatus, setTargetAiNote, scheduleAiRetry],
   );
@@ -5710,7 +5771,9 @@ function WechatPanel({ api, locale }) {
           Promise.resolve(pending)
             .then((late) => {
               try {
-                if (late && late.unsubscribe) late.unsubscribe();
+                // 订阅可能是 unsubscribe 函数，也可能是 { unsubscribe } 对象
+                if (typeof late === "function") late();
+                else if (late && late.unsubscribe) late.unsubscribe();
               } catch (err) {
                 /* 已失效 */
               }
@@ -5845,6 +5908,9 @@ function WechatPanel({ api, locale }) {
             }
             if (msg.error) finish(reject, new Error(msg.error));
             else if (msg.done) finish(resolve, { convId: convId, text: msg.text, incomplete: false });
+            // 部分完成（incomplete / partial_threshold）：阶段必须立刻收口，
+            // 否则会白等满 DEEP_STAGE_TIMEOUT_MS 才按超时处理。
+            else if (msg.partial) finish(resolve, { convId: convId, text: msg.text || lastText, incomplete: true });
           };
           const tick = async () => {
             if (closed) return;
@@ -5873,7 +5939,8 @@ function WechatPanel({ api, locale }) {
               api.metadata.subscribe(
                 "messages",
                 (payload) => handle((payload && payload.domains && payload.domains.messages) || payload),
-                { params: { conversationId: convId } },
+                // 非 live 域必须带间隔，否则订阅只推一次初值（轮询仍在兜底）
+                { params: { conversationId: convId }, intervalMs: AI_SUB_INTERVAL_MS },
               ),
             )
             .then((sub) => {

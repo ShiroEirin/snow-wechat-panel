@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, aiFailureRetryable, aiPartialOutcome, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -481,6 +481,51 @@ ok(
 ok(
   "条数增长会改变指纹",
   lib.aiProgressSig([{ content: "a" }]) !== lib.aiProgressSig([{ content: "a" }, { content: "" }]),
+);
+
+console.log("aiFailureRetryable / aiPartialOutcome（失败终态细分）");
+// 回归：宿主明确 non_retriable 时不能自动重试；incomplete 必须收口而不是等满 10 分钟。
+ok(
+  "non_retriable 不自动重试",
+  lib.aiFailureRetryable(
+    { items: [{ role: "assistant", status: "failed", recoveryOutcome: "non_retriable", content: "" }] },
+    "模型响应失败：本轮未完成，请稍后重试",
+  ) === false,
+);
+ok(
+  "429 可自动重试",
+  lib.aiFailureRetryable(
+    { items: [{ role: "assistant", status: "failed", content: "429 rate limit" }] },
+    "模型请求被限流（429）：本轮未完成",
+  ) === true,
+);
+ok(
+  "cancelled 不可重试",
+  lib.aiFailureRetryable(
+    { items: [{ role: "assistant", status: "cancelled", content: "" }] },
+    "分析已中止",
+  ) === false,
+);
+ok(
+  "无 recoveryOutcome 时按文案判断（含响应失败 = 可重试）",
+  lib.aiFailureRetryable(
+    { items: [{ role: "assistant", status: "failed", content: "" }] },
+    "模型响应失败：本轮未完成，请稍后重试",
+  ) === true,
+);
+ok("incomplete 视为部分完成", lib.aiPartialOutcome({ status: "incomplete" }) === true);
+ok(
+  "partial_threshold 视为部分完成",
+  lib.aiPartialOutcome({ status: "completed", recoveryOutcome: "partial_threshold" }) === true,
+);
+ok("普通 completed 不是部分完成", lib.aiPartialOutcome({ status: "completed" }) === false);
+ok("snake_case 字段也认", lib.aiPartialOutcome({ recovery_outcome: "partial_threshold" }) === true);
+// 回归：incomplete 且正文为空时也必须标记 partial —— 否则会被 applyAiPayload 的
+// `if (!msg.text) return false` 提前拦住，继续白等 10 分钟。
+const partialEmpty = lib.readAiMessage({ items: [{ role: "assistant", status: "incomplete", content: "" }] });
+ok(
+  "incomplete + 空正文仍标记 partial",
+  !!partialEmpty && partialEmpty.partial === true && partialEmpty.text === "" && partialEmpty.done === false,
 );
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);

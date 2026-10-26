@@ -1,6 +1,6 @@
 {
   "name": "snow-wechat-panel",
-  "version": "0.32.28",
+  "version": "0.32.30",
   "private": true,
   "description": "Snow App 微信群聊信息流、统计、分析与离线画报面板",
   "scripts": {
