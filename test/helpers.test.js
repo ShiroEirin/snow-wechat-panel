@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -465,6 +465,23 @@ ok("报纸有打印入口与数据口径", paperHtml.indexOf("window.print()") >
 ok("报纸保留完整导语与无可访问性重复首字", paperHtml.indexOf('aria-label="' + fallbackIssue.lead + '"') >= 0 && paperHtml.indexOf('aria-hidden="true"') >= 0);
 ok("报纸画报无外链资源", paperHtml.indexOf('src="http') < 0 && paperHtml.indexOf("<link") < 0);
 
+console.log("aiProgressSig（轮询进度指纹）");
+// 回归：停滞看门狗靠它判断「有没有在推进」。只算条数 + 字数，不 diff 内容。
+ok("空列表为 0:0", lib.aiProgressSig([]) === "0:0");
+ok("非数组不崩", lib.aiProgressSig(null) === "0:0");
+ok(
+  "内容增长会改变指纹",
+  lib.aiProgressSig([{ content: "abc" }]) !== lib.aiProgressSig([{ content: "abcd" }]),
+);
+ok(
+  "思考增长也改变指纹（长思考不算停滞）",
+  lib.aiProgressSig([{ content: "abc", thinking: "" }]) !==
+    lib.aiProgressSig([{ content: "abc", thinking: "hmm" }]),
+);
+ok(
+  "条数增长会改变指纹",
+  lib.aiProgressSig([{ content: "a" }]) !== lib.aiProgressSig([{ content: "a" }, { content: "" }]),
+);
 console.log("");
 console.log("通过 " + pass + " / 失败 " + fail);
 process.exit(fail === 0 ? 0 : 1);

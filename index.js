@@ -22,6 +22,19 @@ const PAGE_LIMIT = 200;
 const ACCENT = "#3b82f6";
 // 深度分析：轮询兜底超时上限（模型不按契约输出时也要收口）
 const AI_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+// 轮询间隔（订阅之外的兜底通道）
+const AI_POLL_INTERVAL_MS = 2000;
+// messages 不是 live 域：subscribe 不传 intervalMs 只会推一次初值（宿主文档明确），
+// 那样「实时通道」等于只在建会话那一刻推一次，后续更新全靠轮询。
+const AI_SUB_INTERVAL_MS = 2000;
+// 订阅返回 Promise<{unsubscribe}>；个别情况下迟迟不 resolve 时不能让它卡住
+// 「处理中…」与轮询兜底，最多等这么久就放弃订阅、只用轮询。
+const AI_SUB_TIMEOUT_MS = 5000;
+// 停滞看门狗：连续这么久没有任何新消息 / 字数增长，判定本轮已卡住
+//（API 断开但宿主没落 failed 消息时，不能一直「生成中」等满 10 分钟）。
+const AI_STALL_MS = 3 * 60 * 1000;
+// 轮询连续读取失败上限（10 × 2s = 20s）：读通道断了也要明确收口。
+const AI_POLL_FAIL_LIMIT = 10;
 // 同步成功的提示 3 秒后淡出（与 style.css 的 .swf-syncmsg-ok 动画时长对齐）
 const SYNC_OK_FADE_MS = 3000;
 // 成员检索结果分页：MCP 的 list_chatroom_members 没有 offset（服务端分页不存在），
@@ -268,6 +281,19 @@ retryable: !done && /429|暂时不可用|响应失败/.test(error),
     toolPending: !text && assistants.some((m) => m.toolCallsJson),
     done: done,
   };
+}
+
+/** 轮询的「进度指纹」：消息条数 + 正文/思考字数。
+    只用来判断「有没有在推进」——不 diff 内容，避免每 2 秒比较几十万字。
+    任何一项增长都算还在动；全都不动超过 AI_STALL_MS 就判定卡住。 */
+function aiProgressSig(items) {
+  const list = Array.isArray(items) ? items : [];
+  let chars = 0;
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    chars += String((m && m.content) || "").length + String((m && m.thinking) || "").length;
+  }
+  return list.length + ":" + chars;
 }
 
 /** 深挖的「视角」：每个视角一个子代理，按分析维度开关裁剪（关掉的维度不跑，省 token）。 */
@@ -5565,12 +5591,18 @@ function WechatPanel({ api, locale }) {
       if (!convId) return;
       aiConvRef.current = convId;
       aiPollStartRef.current = Date.now();
+      // 停滞看门狗：只比「消息条数 + 正文/思考字数」，不 diff 内容。
+      // API 断开但宿主没落 failed 消息时，也必须能在几分钟内收口，
+      // 不能让面板一直「生成中」等满 10 分钟。
+      let lastSig = "";
+      let lastProgressAt = Date.now();
+      let failStreak = 0;
       aiPollRef.current = setInterval(async () => {
         if (convId !== aiConvRef.current) return;
-        // 超时保护：极端情况下（模型没按约定输出 json）也要收敛，不能无限轮询
+        // 硬超时：模型始终不按契约输出时的最后一道闸
         if (Date.now() - aiPollStartRef.current > AI_POLL_TIMEOUT_MS) {
-          setTargetAiStatus("done");
-          setTargetAiNote("已停止等待：超过 10 分钟未解析到完整结果，可点「打开会话」查看原文。");
+          setTargetAiStatus("error");
+          setTargetAiNote("已停止等待：超过 10 分钟未得到完整结果。可点「重试分析」，或「打开会话」查看原文。");
           stopPoll();
           return;
         }
@@ -5592,11 +5624,36 @@ function WechatPanel({ api, locale }) {
             return;
           }
           const data = (resp && resp.domains && resp.domains.messages) || (resp && resp.messages) || resp;
-          if (applyAiPayload(data)) stopPoll();
+          // 进度指纹：条数 + 正文字数 + 思考字数。任一增长都算「还在动」。
+          const items = data && Array.isArray(data.items) ? data.items : [];
+          const sig = aiProgressSig(items);
+          if (sig !== lastSig) {
+            lastSig = sig;
+            lastProgressAt = Date.now();
+          }
+          failStreak = 0;
+          if (applyAiPayload(data)) {
+            stopPoll();
+            return;
+          }
+          if (Date.now() - lastProgressAt > AI_STALL_MS) {
+            setTargetAiStatus("error");
+            setTargetAiNote(
+              "分析停滞：连续 " + Math.round(AI_STALL_MS / 60000) +
+                " 分钟没有新的输出（API 可能已断开）。可点「重试分析」重新发起，「打开会话」可查看失败前内容。",
+            );
+            stopPoll();
+          }
         } catch (err) {
-          /* 单次读取失败：等下一轮 */
+          // 单次读取失败可以等下一轮；连续失败说明读通道也断了，必须收口
+          failStreak += 1;
+          if (failStreak >= AI_POLL_FAIL_LIMIT) {
+            setTargetAiStatus("error");
+            setTargetAiNote("读取会话消息连续失败（" + errText(err) + "）：已停止等待，可重试或打开会话查看。");
+            stopPoll();
+          }
         }
-      }, 2000);
+      }, AI_POLL_INTERVAL_MS);
     },
     [api, applyAiPayload, stopPoll, setTargetAiStatus, setTargetAiNote],
   );
@@ -5610,9 +5667,12 @@ function WechatPanel({ api, locale }) {
         /* 旧订阅已失效 */
       }
       aiUnsubRef.current = null;
+      // 先起轮询兜底：订阅返回 Promise，宿主迟迟不 resolve 时旧实现会卡在 await 里 ——
+      // 轮询启动不了、setAiBusy(false) 也执行不到，面板就永远停在「处理中…」（真实故障）。
+      startPoll(convId);
       let subscribed = false;
       try {
-        const sub = await api.metadata.subscribe(
+        const pending = api.metadata.subscribe(
           "messages",
           (payload) => {
             if (convId !== aiConvRef.current) return;
@@ -5627,10 +5687,16 @@ function WechatPanel({ api, locale }) {
               stopPoll();
             }
           },
-          { params: { conversationId: convId } },
+          // messages 不是 live 域：不传 intervalMs 只会推一次初值（宿主文档明确），
+          // 那样「实时通道」形同虚设 —— 必须带间隔。
+          { params: { conversationId: convId }, intervalMs: AI_SUB_INTERVAL_MS },
         );
+        const sub = await Promise.race([
+          Promise.resolve(pending),
+          new Promise((resolve) => setTimeout(() => resolve(null), AI_SUB_TIMEOUT_MS)),
+        ]);
         if (convId !== aiConvRef.current) {
-          // 订阅建立期间已经切走：立刻退订，且不要启动新的轮询
+          // 订阅建立期间已经切走：立刻退订（轮询由新的目标接管）
           try {
             if (typeof sub === "function") sub();
             else if (sub && sub.unsubscribe) sub.unsubscribe();
@@ -5639,13 +5705,25 @@ function WechatPanel({ api, locale }) {
           }
           return;
         }
+        if (!sub) {
+          // 超时：轮询已经在跑；迟到的订阅要退掉，避免泄漏
+          Promise.resolve(pending)
+            .then((late) => {
+              try {
+                if (late && late.unsubscribe) late.unsubscribe();
+              } catch (err) {
+                /* 已失效 */
+              }
+            })
+            .catch(() => {});
+          log(api, "subscribeAi: 订阅建立超时，已改用轮询读取");
+          return;
+        }
         aiUnsubRef.current = typeof sub === "function" ? sub : (sub && sub.unsubscribe) || null;
         subscribed = true;
       } catch (err) {
         log(api, "subscribeAi failed: " + errText(err));
       }
-      // 轮询兜底：订阅被拒（例如未声明 messages 域）或丢推送时仍能收敛
-      startPoll(convId);
       if (!subscribed) {
         setSaveMsg("实时订阅不可用，已改用轮询读取该会话；若一直为空，请确认插件已声明 messages 权限。");
       }
@@ -8648,9 +8726,11 @@ function WechatPanel({ api, locale }) {
         "点击章节开关：决定该章节是否写入 Markdown 报告。AI 章节：" +
           (shownAiText
             ? "已并入（" + String(shownAiText).length + " 字" + (deepText && shownAiText === deepText ? "，来自深挖" : "") + "）"
-            : aiStatus === "streaming" || deepBusy
-              ? "生成中…（Agent 写完后自动并入）"
-              : "尚未生成 —— 点上方「AI 分析」里的按钮，写完后会自动并入报告"),
+            : aiStatus === "error"
+              ? "未完成 —— 上次分析中途失败，点上方「重试分析」重新发起"
+              : aiStatus === "streaming" || deepBusy
+                ? "生成中…（Agent 写完后自动并入）"
+                : "尚未生成 —— 点上方「AI 分析」里的按钮，写完后会自动并入报告"),
       ),
       h(
         "div",

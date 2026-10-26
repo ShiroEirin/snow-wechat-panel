@@ -6,7 +6,7 @@ Snow App 插件（ESM 面板）。数据全部来自本机已安装的 **wechat 
 
 | 版本 | 许可 | 依赖 |
 | --- | --- | --- |
-| `0.32.24` | MIT | Snow App ≥ 0.4.27 + wechat MCP |
+| `0.32.29` | MIT | Snow App ≥ 0.4.27 + wechat MCP |
 
 ---
 
