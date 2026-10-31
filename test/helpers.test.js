@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, aiFailureRetryable, aiPartialOutcome, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, aiFailureRetryable, aiPartialOutcome, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, summaryCacheAdoption, AI_SUMMARY_CACHE_VERSION, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -350,6 +350,17 @@ ok(
 ok("统计跨群不新鲜", lib.statsIsFresh("room-a", { start: "a", end: "b" }, "room-b", "a", "b") === false);
 ok("统计范围不符不新鲜", lib.statsIsFresh("room-a", { start: "a", end: "b" }, "room-a", "a", "c") === false);
 ok("没有统计作用域时不新鲜", lib.statsIsFresh("", { start: "", end: "" }, "room-a", "", "") === false);
+
+console.log("summaryCacheAdoption（总结缓存口径）");
+const currentCache = { cacheVersion: lib.AI_SUMMARY_CACHE_VERSION, text: "正文".repeat(200), data: { summary: "x" }, rangeStart: "a", rangeEnd: "b" };
+eq("新缓存同范围可作为当前结果", lib.summaryCacheAdoption(currentCache, "a", "b"), "current");
+eq("新缓存跨范围只作上次结果", lib.summaryCacheAdoption(currentCache, "a", "c"), "stale-range");
+eq("旧版缓存范围不可信、绝不恢复为当前", lib.summaryCacheAdoption({ text: "正文".repeat(200), data: {}, rangeStart: "a", rangeEnd: "b" }, "a", "b"), "stale-legacy");
+eq("旧版短开场白直接忽略", lib.summaryCacheAdoption({ text: "先取数", rangeStart: "a", rangeEnd: "b" }, "a", "b"), "empty");
+eq("空缓存忽略", lib.summaryCacheAdoption(null, "a", "b"), "empty");
+ok("保存缓存使用分析启动范围而非完成时范围", src.indexOf("rangeStart: scope.start") >= 0 && src.indexOf("rangeEnd: scope.end") >= 0);
+ok("缓存保存不会被改范围重新触发", !src.includes("aiStatus, aiText, aiData, rangeStart, rangeEnd, summaryKey"));
+ok("完成但范围变化时保留上次分析入口", src.indexOf('"上次分析已完成 · "') >= 0 && src.indexOf("回到该分析范围") >= 0);
 
 console.log("面板初始化顺序");
 // 回归：v0.32.26 曾把 liveScopeRef.current 的赋值写在 rangeStart 声明之前，

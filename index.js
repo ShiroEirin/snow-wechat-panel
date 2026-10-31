@@ -28,6 +28,9 @@ const AI_POLL_INTERVAL_MS = 2000;
 // 那样「实时通道」等于只在建会话那一刻推一次，后续更新全靠轮询。
 // 既然非 live 域的订阅本质也是定时拉取，间隔比轮询放宽一档，避免双通道重复读。
 const AI_SUB_INTERVAL_MS = 5000;
+// 总结缓存格式版本：v2 起记录「本轮分析实际范围」和会话 id。
+// 旧版在分析途中改范围时会把结果误记成新范围，不能再冒充当前口径。
+const AI_SUMMARY_CACHE_VERSION = 2;
 // 订阅返回 Promise<{unsubscribe}>；个别情况下迟迟不 resolve 时不能让它卡住
 // 「处理中…」与轮询兜底，最多等这么久就放弃订阅、只用轮询。
 const AI_SUB_TIMEOUT_MS = 5000;
@@ -3907,6 +3910,15 @@ function rangeBound(dateValue, timeValue, isEnd) {
 /** 缓存/结果是否属于当前查询口径。
     全历史模式要求缓存也是全历史；否则必须 start/end 完全一致。
     没有这个校验时，换日期后会把上一段时间的总结恢复成「当前结果」。 */
+/** 总结缓存能否作为当前结果使用。
+    v1 缓存的 rangeStart/rangeEnd 可能被「分析途中改范围」污染，因此只允许展示、不允许恢复。 */
+function summaryCacheAdoption(saved, start, end) {
+  if (!saved || !saved.text) return "empty";
+  if (!saved.data && String(saved.text).length < 200) return "empty";
+  if (saved.cacheVersion !== AI_SUMMARY_CACHE_VERSION) return "stale-legacy";
+  return scopeMatches(saved, start, end, false) ? "current" : "stale-range";
+}
+
 function scopeMatches(saved, start, end, allTime) {
   if (!saved) return false;
   if (allTime) return saved.allTime === true;
@@ -4533,6 +4545,8 @@ function WechatPanel({ api, locale }) {
   const [aiConvId, setAiConvId] = useState("");
   const [aiStatus, setAiStatus] = useState("");
   const [saveMsg, setSaveMsg] = useState("");
+  // 当前范围与缓存范围不一致时，不把旧结果当当前结论；保留为可展开的「上次分析」。
+  const [aiStaleCache, setAiStaleCache] = useState(null);
   const aiUnsubRef = useRef(null);
   const aiPollRef = useRef(null);
   const aiPollStartRef = useRef(0);
@@ -5086,6 +5100,7 @@ function WechatPanel({ api, locale }) {
     setAiData(null);
     setAiConvId("");
     setAiStatus("");
+    setAiStaleCache(null);
     setAiBusy(false);
     setCreated(null);
     // 成员画像与它的 AI 分析
@@ -5454,18 +5469,24 @@ function WechatPanel({ api, locale }) {
     if (!sessionId || aiStatus !== "done" || !aiText) return;
     try {
       if (api.storage && api.storage.setJson) {
+        // 必须保存本轮分析的启动口径，不能保存完成瞬间面板上的范围：
+        // 分析途中改范围时，后者会让完整结果被错误标记成另一个时间窗。
+        const scope = aiScopeRef.current;
+        if (!scope || !scope.start || !scope.end) return;
         api.storage.setJson(summaryKey(sessionId), {
+          cacheVersion: AI_SUMMARY_CACHE_VERSION,
+          conversationId: aiConvId || "",
           text: aiText,
           data: aiData || null,
-          rangeStart: rangeStart,
-          rangeEnd: rangeEnd,
+          rangeStart: scope.start,
+          rangeEnd: scope.end,
           at: Date.now(),
         });
       }
     } catch (err) {
       /* 存不进去不影响展示 */
     }
-  }, [api, sessionId, aiStatus, aiText, aiData, rangeStart, rangeEnd, summaryKey]);
+  }, [api, sessionId, aiStatus, aiText, aiData, aiConvId, summaryKey]);
 
   // 成员分析完成即落盘（正文 + 结构化数据 + 口径），刷新 / 切群再回来不丢
   useEffect(() => {
@@ -5504,11 +5525,18 @@ function WechatPanel({ api, locale }) {
     Promise.resolve()
       .then(() => (api.storage && api.storage.getJson ? api.storage.getJson(summaryKey(sessionId)) : null))
       .then((saved) => {
-        if (!alive || !saved || !saved.text) return;
-        // 缓存必须属于当前会话 + 当前时间窗：否则换日期后会把上一段时间的总结当成当前结果。
-        if (!scopeMatches(saved, rangeStart, rangeEnd, false)) return;
-        // 同成员分析：没有结构化数据又很短 = 旧版误收口的开场白，不回填
-        if (!saved.data && String(saved.text).length < 200) return;
+        if (!alive) return;
+        const verdict = summaryCacheAdoption(saved, rangeStart, rangeEnd);
+        if (verdict === "empty") {
+          setAiStaleCache(null);
+          return;
+        }
+        // 范围不符或旧版缓存只放进「上次分析」供查看，绝不冒充当前口径。
+        if (verdict !== "current") {
+          setAiStaleCache(saved);
+          return;
+        }
+        setAiStaleCache(null);
         aiScopeRef.current = { start: rangeStart, end: rangeEnd };
         setAiText((prev) => prev || saved.text);
         setAiData((prev) => prev || saved.data || null);
@@ -5528,12 +5556,28 @@ function WechatPanel({ api, locale }) {
     if (!scope.start && !scope.end) return;
     if (aiStatus === "streaming" || aiBusy || deepBusy) return;
     if (scope.start === rangeStart && scope.end === rangeEnd) return;
+    // 结果已经落盘（保存 effect 先执行）。这里只把它移出「当前结论」，
+    // 但仍保留在「上次分析」里，用户不会看到结果凭空消失。
+    if (aiText) {
+      setAiStaleCache({
+        cacheVersion: AI_SUMMARY_CACHE_VERSION,
+        conversationId: aiConvId || "",
+        text: aiText,
+        data: aiData || null,
+        rangeStart: scope.start,
+        rangeEnd: scope.end,
+        at: Date.now(),
+      });
+      setSaveMsg(
+        "本轮分析已完成并保存（范围 " + scope.start + " ~ " + scope.end +
+          "）。当前面板范围已改变，结果不会冒充当前口径；可在下方「上次分析」查看或切回原范围。",
+      );
+    }
     aiScopeRef.current = { start: "", end: "" };
     setAiText("");
     setAiData(null);
     setAiStatus("");
-    setSaveMsg("");
-  }, [sessionId, rangeStart, rangeEnd, aiStatus, aiBusy, deepBusy]);
+  }, [sessionId, rangeStart, rangeEnd, aiStatus, aiBusy, deepBusy, aiText, aiData, aiConvId]);
 
   /* ---- AI 深度分析：面板内流式渲染 ----
      两条数据通道：messages 域订阅（实时）+ 2s 轮询兜底。
@@ -5820,6 +5864,7 @@ function WechatPanel({ api, locale }) {
     setAiText("");
     setAiData(null);
     setAiConvId("");
+    setAiStaleCache(null);
     setSaveMsg("");
     setAiStatus("streaming");
     try {
@@ -7293,6 +7338,22 @@ function WechatPanel({ api, locale }) {
       end: dateStr(to) + " " + timeStr(to) + ":59",
     });
   }, [loadStats]);
+
+  /** 回到某次已完成分析的实际范围。用于「上次分析」—— 不允许用旧结果冒充当前口径，
+      但必须给用户一条一键恢复的路径，而不是让整块内容凭空消失。 */
+  const restoreAiScope = useCallback((scope) => {
+    if (!scope || !scope.start || !scope.end) return;
+    const d1 = String(scope.start).slice(0, 10);
+    const t1 = String(scope.start).slice(11, 16);
+    const d2 = String(scope.end).slice(0, 10);
+    const t2 = String(scope.end).slice(11, 16);
+    if (!d1 || !t1 || !d2 || !t2) return;
+    setReportPeriod("custom");
+    setStart(d1);
+    setStartTime(t1);
+    setEnd(d2);
+    setEndTime(t2);
+  }, []);
 
   /* ---- 时间快捷预设：今天 / 近 7 天 / 近 30 天
      今天 = 日报（与自然日同口径）；近 7 / 30 天是滚动窗口，标为「自定义」，
@@ -8781,6 +8842,40 @@ function WechatPanel({ api, locale }) {
         ? h("div", { className: "swf-actions" },
             h("button", { className: "swf-btn", disabled: aiBusy || deepBusy, onClick: retryAiNow }, aiRetrySeconds ? "立即重试（自动倒计时 " + aiRetrySeconds + "s）" : "立即重试"),
             aiRetrySeconds ? h("button", { className: "swf-btn", onClick: cancelAiRetry }, "取消自动重试") : null)
+        : null,
+      // 结果不会因为改范围而消失：与当前口径不一致时收进这里，明确标注分析范围。
+      aiStaleCache && !shownAiText && deepMode !== "deep"
+        ? h(
+            "details",
+            { className: "swf-stale" },
+            h(
+              "summary",
+              null,
+              "上次分析已完成 · " +
+                String(aiStaleCache.rangeStart || "范围未知") +
+                " ~ " +
+                String(aiStaleCache.rangeEnd || ""),
+            ),
+            h(
+              "div",
+              { className: "swf-note" },
+              aiStaleCache.cacheVersion === AI_SUMMARY_CACHE_VERSION
+                ? "该结果属于上一次分析范围，不是当前面板范围，未计入当前报告。"
+                : "这是旧版缓存：保存时的时间范围可能因历史缺陷而不准确，仅供查看正文；建议在当前范围重新分析。",
+            ),
+            aiStaleCache.cacheVersion === AI_SUMMARY_CACHE_VERSION
+              ? h(
+                  "div",
+                  { className: "swf-actions" },
+                  h(
+                    "button",
+                    { className: "swf-btn", disabled: aiBusy || deepBusy, onClick: () => restoreAiScope({ start: aiStaleCache.rangeStart, end: aiStaleCache.rangeEnd }) },
+                    "回到该分析范围",
+                  ),
+                )
+              : null,
+            h("div", { className: "swf-ai-out swf-ai-md" }, mdToReact(stripAiJson(aiStaleCache.text))),
+          )
         : null,
 
       // （结果与操作按钮已并入上方「AI 分析」区块：档位决定跑哪条管线，结果按档位优先展示）

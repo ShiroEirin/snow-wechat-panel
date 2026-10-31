@@ -31,10 +31,21 @@ const { act } = React;
       domains: async () => [],
     },
     write: {
-      run: async () => ({ ok: true, data: {} }),
+      run: async (action, params) => {
+        if (params && params.toolFullName === "wechat-list_wechat_sessions") {
+          return { ok: true, data: [{ session_id: "room-a@chatroom", display_name: "测试群", type: "room", message_count: 2 }] };
+        }
+        return { ok: true, data: { items: [] } };
+      },
       domains: () => [{ id: "mcpTools", granted: true, actions: [{ id: "mcpTools.call", granted: true }] }],
     },
-    storage: { getJson: async () => null, setJson: async () => ({ ok: true }) },
+    storage: {
+      // 模拟真实故障遗留的 v1 缓存：正文完整，但时间范围不可信。
+      getJson: async (key) => key === "aiSummary:room-a@chatroom"
+        ? { text: "# 已完成的分析\n\n" + "正文内容".repeat(80), data: { summary: "旧结果" }, rangeStart: "2026-10-31 00:54:00", rangeEnd: "2026-11-01 00:54:59" }
+        : null,
+      setJson: async () => ({ ok: true }),
+    },
     assets: { resolve: (x) => x },
     log: () => {},
     t: (x) => x,
@@ -60,6 +71,8 @@ const { act } = React;
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
     if (!document.body.textContent.includes("画报 · HTML")) throw new Error("总结 / 画报视图未完成渲染");
+    if (!document.body.textContent.includes("上次分析已完成")) throw new Error("旧版缓存没有进入「上次分析」，完成结果仍会凭空消失");
+    if (!document.body.textContent.includes("旧版缓存")) throw new Error("旧版缓存缺少范围不可信提示");
     if (errors.length) throw new Error("React 渲染错误：" + errors.join("\n"));
     console.log("通过：真实 React 面板挂载、总结 / 画报视图渲染与卸载；无 TDZ / render error");
   } finally {

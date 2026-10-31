@@ -983,6 +983,22 @@
   font-size: 11px;
   margin: 6px 4px;
 }
+.swf-stale {
+  margin: 8px 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--swf-amber);
+  border-radius: 3px;
+  background: var(--swf-active);
+}
+.swf-stale > summary {
+  cursor: pointer;
+  color: var(--swf-text);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.swf-stale[open] > summary {
+  margin-bottom: 6px;
+}
 .swf-code {
   display: block;
   margin: 4px 0;

@@ -9,7 +9,7 @@
     "default": "WeChat group-chat feed, digest, and an MCP tool console — backed by the locally installed wechat MCP server (read-only).",
     "zh-CN": "基于本机已安装的 wechat MCP 服务：微信群聊信息流、统计/总结，以及可直接调用的 MCP 工具台（只读）。"
   },
-  "version": "0.32.30",
+  "version": "0.32.31",
   "author": "ShiroEirin",
   "license": "MIT",
   "icon": "lucide:MessageSquare",
