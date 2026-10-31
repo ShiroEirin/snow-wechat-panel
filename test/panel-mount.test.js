@@ -5,6 +5,7 @@ const path = require("path");
 const { JSDOM } = require("jsdom");
 const React = require("react");
 const { createRoot } = require("react-dom/client");
+const { renderToStaticMarkup } = require("react-dom/server");
 const { act } = React;
 
 (async () => {
@@ -52,7 +53,8 @@ const { act } = React;
   };
   window.SnowAppPlugin = { React, api, icons: {}, locale: "zh-CN" };
   window.snow = { readFileContent: async () => "" };
-  const Panel = new Function("window", "module", "exports", sanitized + "\nreturn __Panel;")(window, { exports: {} }, {});
+  const mod = new Function("window", "module", "exports", sanitized + "\nreturn { Panel: __Panel, aiInsightNodes, aiChartNodes };")(window, { exports: {} }, {});
+  const Panel = mod.Panel;
   const errors = [];
   const oldError = console.error;
   console.error = (...args) => errors.push(args.map(String).join(" "));
@@ -73,8 +75,27 @@ const { act } = React;
     if (!document.body.textContent.includes("画报 · HTML")) throw new Error("总结 / 画报视图未完成渲染");
     if (!document.body.textContent.includes("上次分析已完成")) throw new Error("旧版缓存没有进入「上次分析」，完成结果仍会凭空消失");
     if (!document.body.textContent.includes("旧版缓存")) throw new Error("旧版缓存缺少范围不可信提示");
+    const insightHtml = renderToStaticMarkup(
+      React.createElement("div", null, ...mod.aiInsightNodes({ insights: [{ 内容: "建议A", 依据: "依据B" }] }, "")),
+    );
+    if (!insightHtml.includes("建议A") || !insightHtml.includes("依据B") || insightHtml.includes("[object Object]")) {
+      throw new Error("对象型观察与建议渲染错误：" + insightHtml);
+    }
+    const body = "## 😄 逆天瞬间\n正文记录\n\n## 群画像\n正文画像";
+    const chartDeduped = renderToStaticMarkup(
+      React.createElement("div", null, ...mod.aiChartNodes({ wild_moments: [{ who: "甲", text: "名场面" }], profile: { summary: "画像" } }, body)),
+    );
+    if (chartDeduped.includes("逆天瞬间") || chartDeduped.includes("群画像")) {
+      throw new Error("正文已有章节时仍重复渲染结构化卡片：" + chartDeduped);
+    }
+    const chartNoBody = renderToStaticMarkup(
+      React.createElement("div", null, ...mod.aiChartNodes({ wild_moments: [{ who: "甲", text: "名场面" }], profile: { summary: "画像" } }, "")),
+    );
+    if (!chartNoBody.includes("逆天瞬间") || !chartNoBody.includes("群画像")) {
+      throw new Error("正文没有对应章节时结构化卡片不应消失");
+    }
     if (errors.length) throw new Error("React 渲染错误：" + errors.join("\n"));
-    console.log("通过：真实 React 面板挂载、总结 / 画报视图渲染与卸载；无 TDZ / render error");
+    console.log("通过：真实 React 面板挂载、对象洞察、正文去重、总结 / 画报视图渲染与卸载；无 TDZ / render error");
   } finally {
     await act(async () => root.unmount());
     console.error = oldError;

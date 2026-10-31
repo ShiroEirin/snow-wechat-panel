@@ -529,9 +529,58 @@ function readProgressMarks(text) {
   }
   return out;
 }
+/** 标题归一化：去掉 emoji、标点和空白，只比较可读文字。 */
+function markdownSectionSet(text) {
+  const out = new Set();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const m = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/);
+    if (!m) continue;
+    const key = m[1].replace(/[^\p{L}\p{N}]+/gu, "");
+    if (key) out.add(key);
+  }
+  return out;
+}
+
+/** 正文是否已经包含某个结构化章节。已有正文时不再重复画同义卡片。 */
+function bodyHasSection(text, aliases) {
+  const set = markdownSectionSet(text);
+  const normalize = (v) => String(v || "").replace(/[^\p{L}\p{N}]+/gu, "");
+  return aliases.some((a) => set.has(normalize(a)));
+}
+
+/** 观察与建议既接受旧版字符串，也接受 {内容, 依据} 对象。
+    绝不能把对象直接交给 React / String()，否则界面显示 [object Object]。 */
+function normalizeInsight(x) {
+  if (x === null || x === undefined) return { content: "", evidence: "" };
+  if (typeof x === "string") return { content: x.trim(), evidence: "" };
+  if (typeof x !== "object") return { content: String(x), evidence: "" };
+  const valueOf = (v) => {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") return v.trim();
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return v.map(valueOf).filter(Boolean).join("；");
+    try {
+      return Object.keys(v).map((k) => k + "：" + valueOf(v[k])).filter(Boolean).join("；");
+    } catch (err) {
+      return "";
+    }
+  };
+  const content = valueOf(x["内容"] || x.content || x.text || x.insight || x.advice || x["建议"] || x.summary);
+  const evidence = valueOf(x["依据"] || x.evidence || x.reason || x.basis || x.why || x["理由"]);
+  return {
+    content: content || valueOf(x),
+    evidence: evidence,
+  };
+}
+
+function insightText(x) {
+  const v = normalizeInsight(x);
+  return v.evidence ? v.content + "（依据：" + v.evidence + "）" : v.content;
+}
+
 /** Agent 结构化结果的图表渲染（单轮深度分析与深挖汇总共用：schema 相同 → 渲染也共用）。
     内部沿用单轮管线的变量名，便于与既有代码逐行对应；返回节点数组，调用方展开。 */
-function aiChartNodes(data) {
+function aiChartNodes(data, bodyText) {
   const aiData = data;
   return [
       // 导语卡：AI 的「一句话摘要」放最前当视觉焦点（原「Agent 热度图」已删除）
@@ -611,7 +660,7 @@ function aiChartNodes(data) {
             aiData.todos.map((x, i) => h("div", { className: "swf-todo", key: "todo-" + i }, h("b", null, x.who || "?"), " · ", String(x.what || ""))),
           )
         : null,
-      aiData && Array.isArray(aiData.risks) && aiData.risks.length
+      aiData && Array.isArray(aiData.risks) && aiData.risks.length && !bodyHasSection(bodyText, ["风险", "争议", "争议点与风险", "风险与争议"])
         ? h(
             "div",
             null,
@@ -682,7 +731,7 @@ function aiChartNodes(data) {
             );
           })()
         : null,
-      aiData && Array.isArray(aiData.controversies) && aiData.controversies.length
+      aiData && Array.isArray(aiData.controversies) && aiData.controversies.length && !bodyHasSection(bodyText, ["争议指数", "争议点与风险", "争议与风险"])
         ? h(
             "div",
             null,
@@ -701,7 +750,7 @@ function aiChartNodes(data) {
             ),
           )
         : null,
-      aiData && Array.isArray(aiData.titles) && aiData.titles.length
+      aiData && Array.isArray(aiData.titles) && aiData.titles.length && !bodyHasSection(bodyText, ["称号", "AI称号", "人物称号"])
         ? h(
             "div",
             null,
@@ -720,7 +769,7 @@ function aiChartNodes(data) {
             ),
           )
         : null,
-      aiData && Array.isArray(aiData.quotes) && aiData.quotes.length
+      aiData && Array.isArray(aiData.quotes) && aiData.quotes.length && !bodyHasSection(bodyText, ["金句", "金句候选", "原话"])
         ? h(
             "div",
             null,
@@ -737,7 +786,7 @@ function aiChartNodes(data) {
             ),
           )
         : null,
-      aiData && Array.isArray(aiData.wild_moments) && aiData.wild_moments.length
+      aiData && Array.isArray(aiData.wild_moments) && aiData.wild_moments.length && !bodyHasSection(bodyText, ["逆天瞬间", "逆天发言", "名场面"])
         ? h(
             "div",
             null,
@@ -753,7 +802,7 @@ function aiChartNodes(data) {
             ),
           )
         : null,
-      aiData && aiData.profile && typeof aiData.profile === "object"
+      aiData && aiData.profile && typeof aiData.profile === "object" && !bodyHasSection(bodyText, ["群画像", "群像"])
         ? h(
             "div",
             null,
@@ -774,9 +823,12 @@ function aiChartNodes(data) {
 
 /** 观察与建议：主观判断独立成块，渲染在正文**之后** —— 读者先看完事实与依据，
     再看 AI 的判断（信任设计）。长图与 Markdown 报告同样把它放末尾，三端顺序一致。 */
-function aiInsightNodes(data) {
+function aiInsightNodes(data, bodyText) {
   const aiData = data || null;
   if (!aiData || !Array.isArray(aiData.insights) || !aiData.insights.length) return [];
+  if (bodyHasSection(bodyText, ["观察与建议", "观察与建议主观"])) return [];
+  const rows = aiData.insights.map(normalizeInsight).filter((x) => x.content);
+  if (!rows.length) return [];
   return [
     h(
       "div",
@@ -788,7 +840,14 @@ function aiInsightNodes(data) {
         "观察与建议",
         h("span", { className: "swf-badge" }, "主观"),
       ),
-      aiData.insights.slice(0, 5).map((x, i) => h("div", { className: "swf-insight", key: "ins-" + i }, "→ ", String(x))),
+      rows.slice(0, 5).map((x, i) =>
+        h(
+          "div",
+          { className: "swf-insight", key: "ins-" + i },
+          h("div", null, "→ ", x.content),
+          x.evidence ? h("div", { className: "swf-note" }, "依据：" + x.evidence) : null,
+        ),
+      ),
     ),
   ];
 }
@@ -852,7 +911,7 @@ function aiJsonFields(dims, limits) {
   if (d.quotes) fields.push('  "wild_moments": [{"who": "谁", "time": "HH:MM", "text": "原文逐字", "why": "为什么逆天"}]');
   if (d.profile) fields.push('  "profile": {"summary": "群画像一句话", "style": "交流风格", "advice": ["行动建议"]}');
   // 观察与建议：放结尾 —— 主观判断必须在事实之后，读者先看依据再看判断
-  fields.push('  "insights": ["见解（2-3 条，主观判断与建议，每条要能指出依据）"]');
+  fields.push('  "insights": [{"内容": "主观判断与建议（一句话）", "依据": "来自上文或统计的具体依据"}]');
   return fields;
 }
 
@@ -880,7 +939,7 @@ function aiJsonConstraints(dims, limits) {
       "text 必须能在原文里逐字找到，time 用原文消息的时间（HH:MM），why 一句话说清离谱在哪；没有就给空数组，不要硬凑。",
   );
   if (d.profile) out.push("- profile.advice 2-4 条，面向群管理员或参与者。");
-  out.push("- insights 2-3 条，是主观判断与建议（面板会标注为「主观」），每条都要能指出依据；没把握就给空数组。");
+  out.push("- insights 2-3 条，是主观判断与建议（面板会标注为「主观」）；每条必须写成 {内容, 依据} 对象，依据要能指向上文事实或统计，没把握就给空数组。");
   out.push("- 没有数据的字段给空数组 / 空对象，不要编造。");
   return out;
 }
@@ -2731,7 +2790,8 @@ function buildReportHtml(opts) {
       "</div></div>"
     : "";
 
-  const aiText = String(o.aiText || "").replace(/```json[\s\S]*?```/i, "").trim();
+  // 调用方可能传完整成稿（含 <<<AI_JSON>>>）：长图必须与面板一样先统一剥离。
+  const aiText = stripAiJson(String(o.aiText || "")).trim();
   const ai = o.aiData || {};
   const list = (x) => (Array.isArray(x) ? x : []);
   // 导语：AI 的一句话摘要（Hero 区视觉焦点）
@@ -2789,7 +2849,7 @@ function buildReportHtml(opts) {
           .join(""),
     );
   }
-  if (list(ai.risks).length) {
+  if (list(ai.risks).length && !bodyHasSection(aiText, ["风险", "争议", "争议点与风险", "风险与争议"])) {
     aiBlocks.push('<div class="sec">风险 / 争议</div>' + list(ai.risks).map((r) => '<div class="risk">• ' + escHtml(r) + "</div>").join(""));
   }
   // 情绪：单点退化为横条摘要、≥2 点才画柱 —— 与面板同一分支逻辑（日报只有一天时单点画不出曲线）
@@ -2861,7 +2921,7 @@ function buildReportHtml(opts) {
           .join(""),
     );
   }
-  if (list(ai.quotes).length) {
+  if (list(ai.quotes).length && !bodyHasSection(aiText, ["金句", "金句候选", "原话"])) {
     aiBlocks.push(
       '<div class="sec">金句</div>' +
         list(ai.quotes)
@@ -2869,7 +2929,7 @@ function buildReportHtml(opts) {
           .join(""),
     );
   }
-  if (list(ai.wild_moments).length) {
+  if (list(ai.wild_moments).length && !bodyHasSection(aiText, ["逆天瞬间", "逆天发言", "名场面"])) {
     aiBlocks.push(
       '<div class="sec">逆天瞬间</div>' +
         list(ai.wild_moments)
@@ -2886,7 +2946,7 @@ function buildReportHtml(opts) {
           .join(""),
     );
   }
-  if (ai.profile && typeof ai.profile === "object") {
+  if (ai.profile && typeof ai.profile === "object" && !bodyHasSection(aiText, ["群画像", "群像"])) {
     aiBlocks.push(
       '<div class="sec">群画像</div>' +
         (ai.profile.summary ? '<div class="item">' + escHtml(ai.profile.summary) + "</div>" : "") +
@@ -2897,11 +2957,13 @@ function buildReportHtml(opts) {
     );
   }
   // 观察与建议：主观判断收尾（与面板、报告同序）
-  if (list(ai.insights).length) {
+  if (list(ai.insights).length && !bodyHasSection(aiText, ["观察与建议", "观察与建议主观"])) {
     aiBlocks.push(
       '<div class="sec">观察与建议<small>主观</small></div>' +
         list(ai.insights)
-          .map((x) => '<div class="item">→ ' + escHtml(x) + "</div>")
+          .map(normalizeInsight)
+          .filter((x) => x.content)
+          .map((x) => '<div class="item">→ ' + escHtml(x.content) + (x.evidence ? '<div class="muted">依据：' + escHtml(x.evidence) + "</div>" : "") + "</div>")
           .join(""),
     );
   }
@@ -6920,7 +6982,7 @@ function WechatPanel({ api, locale }) {
         lines.push("## 情绪曲线");
         list(aiData.sentiment).forEach((x) => lines.push("- " + String(x.period || "") + "：" + (Number(x.score) || 0)));
       }
-      if (list(aiData.controversies).length) {
+      if (list(aiData.controversies).length && !bodyHasSection(aiText, ["争议指数", "争议点与风险", "争议与风险"])) {
         lines.push("");
         lines.push("## 争议指数");
         list(aiData.controversies).forEach((x) =>
@@ -6941,12 +7003,12 @@ function WechatPanel({ api, locale }) {
           lines.push("- " + String(x.who || "") + " · " + String(x.title || "") + (x.reason ? "（" + x.reason + "）" : "")),
         );
       }
-      if (list(aiData.quotes).length) {
+      if (list(aiData.quotes).length && !bodyHasSection(aiText, ["金句", "金句候选", "原话"])) {
         lines.push("");
         lines.push("## 金句");
         list(aiData.quotes).forEach((x) => lines.push("> " + String(x.text || "") + " —— " + String(x.who || "")));
       }
-      if (list(aiData.wild_moments).length) {
+      if (list(aiData.wild_moments).length && !bodyHasSection(aiText, ["逆天瞬间", "逆天发言", "名场面"])) {
         lines.push("");
         lines.push("## 逆天瞬间");
         list(aiData.wild_moments).forEach((x) =>
@@ -6957,7 +7019,7 @@ function WechatPanel({ api, locale }) {
           ),
         );
       }
-      if (aiData.profile && typeof aiData.profile === "object") {
+      if (aiData.profile && typeof aiData.profile === "object" && !bodyHasSection(aiText, ["群画像", "群像"])) {
         lines.push("");
         lines.push("## 群画像");
         if (aiData.profile.summary) lines.push(String(aiData.profile.summary));
@@ -6967,10 +7029,13 @@ function WechatPanel({ api, locale }) {
     }
 
     // 观察与建议：主观判断收尾（与面板同序：先事实、后判断）
-    if (reportSections.ai && aiData && Array.isArray(aiData.insights) && aiData.insights.length) {
-      lines.push("");
-      lines.push("## 观察与建议（主观）");
-      aiData.insights.forEach((x) => lines.push("- " + String(x)));
+    if (reportSections.ai && aiData && Array.isArray(aiData.insights) && aiData.insights.length && !bodyHasSection(aiText, ["观察与建议", "观察与建议主观"])) {
+      const rows = aiData.insights.map(normalizeInsight).filter((x) => x.content);
+      if (rows.length) {
+        lines.push("");
+        lines.push("## 观察与建议（主观）");
+        rows.forEach((x) => lines.push("- " + x.content + (x.evidence ? "（依据：" + x.evidence + "）" : "")));
+      }
     }
 
     lines.push("");
@@ -8801,9 +8866,9 @@ function WechatPanel({ api, locale }) {
         : null,
       // 结果：图表 + 正文 + 见解（单轮与深挖共用同一渲染，展示哪个由档位决定）
       // 见解必须排在正文之后 —— 与长图 / Markdown 报告的「观察与建议（主观）」位置一致
-      ...(aiChartNodes(shownAiData) || []),
+      ...(aiChartNodes(shownAiData, shownAiText) || []),
       shownAiText ? h("div", { className: "swf-ai-out swf-ai-md" }, mdToReact(shownAiText)) : null,
-      ...(aiInsightNodes(shownAiData) || []),
+      ...(aiInsightNodes(shownAiData, shownAiText) || []),
       // 唯一的操作按钮：档位决定它跑哪条管线
       h(
         "div",

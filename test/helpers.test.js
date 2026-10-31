@@ -31,7 +31,7 @@ const factory = new Function(
   "module",
   "exports",
   head +
-    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, aiFailureRetryable, aiPartialOutcome, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, summaryCacheAdoption, AI_SUMMARY_CACHE_VERSION, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
+    "\nreturn { unwrapMcp, asArray, classify, isMedia, speakerColor, fmtNum, preview, dayKeyOf, hhmmOf, readAiMessage, aiFailureMessage, aiProgressSig, aiFailureRetryable, aiPartialOutcome, stripAiJson, buildStatsBrief, quoteCharsHint, mdStatusOf, mdStatusRest, memberRangeText, planDeepSegments, activeDeepLenses, rangeDaysOf, deepLensCap, deepVerifyWidth, clipForStage, scopeMatches, summaryCacheAdoption, AI_SUMMARY_CACHE_VERSION, markdownSectionSet, bodyHasSection, normalizeInsight, insightText, statsIsFresh, fileStamp, issueHeadlineLines, editorialMetrics, normalizeEditorial, editorialPrompt, buildArtIssueHtml, buildNewspaperHtml };",
 );
 const lib = factory(windowStub, { exports: {} }, {});
 
@@ -361,6 +361,24 @@ eq("空缓存忽略", lib.summaryCacheAdoption(null, "a", "b"), "empty");
 ok("保存缓存使用分析启动范围而非完成时范围", src.indexOf("rangeStart: scope.start") >= 0 && src.indexOf("rangeEnd: scope.end") >= 0);
 ok("缓存保存不会被改范围重新触发", !src.includes("aiStatus, aiText, aiData, rangeStart, rangeEnd, summaryKey"));
 ok("完成但范围变化时保留上次分析入口", src.indexOf('"上次分析已完成 · "') >= 0 && src.indexOf("回到该分析范围") >= 0);
+
+console.log("对象型洞察与正文去重");
+const insightObj = lib.normalizeInsight({ 内容: "建议把评测写成任务卡", 依据: "多条评价缺少使用场景" });
+eq("对象洞察取内容", insightObj.content, "建议把评测写成任务卡");
+eq("对象洞察取依据", insightObj.evidence, "多条评价缺少使用场景");
+eq("对象洞察文本包含依据", lib.insightText({ 内容: "任务卡", 依据: "缺少场景" }), "任务卡（依据：缺少场景）");
+ok("对象洞察绝不渲染 [object Object]", lib.insightText({ 内容: "x", 依据: "y" }).indexOf("[object Object]") < 0);
+eq("英文字段对象也兼容", lib.normalizeInsight({ content: "A", reason: "B" }), { content: "A", evidence: "B" });
+eq("旧版字符串仍然兼容", lib.normalizeInsight("普通建议"), { content: "普通建议", evidence: "" });
+ok("嵌套对象不会丢成 object", lib.insightText({ 内容: { 要点: "A", 动作: ["B"] }, 依据: ["C", "D"] }).indexOf("要点：A") >= 0);
+const bodyWithSections = "# 分析\n\n## 😄 群氛围\n正文\n\n## 逆天瞬间\n原话\n\n## 群画像\n画像\n\n## 观察与建议（主观）\n建议";
+ok("标题集合去掉 emoji 与标点", lib.markdownSectionSet(bodyWithSections).has("逆天瞬间") && lib.markdownSectionSet(bodyWithSections).has("群画像"));
+ok("正文已有逆天瞬间时不再画重复卡片", lib.bodyHasSection(bodyWithSections, ["逆天瞬间"]) === true);
+ok("正文已有群画像时不再画重复卡片", lib.bodyHasSection(bodyWithSections, ["群画像"]) === true);
+ok("正文已有观察建议时不再画重复卡片", lib.bodyHasSection(bodyWithSections, ["观察与建议", "观察与建议主观"]) === true);
+ok("正文没有金句时仍保留结构化金句卡", lib.bodyHasSection(bodyWithSections, ["金句", "金句候选"]) === false);
+ok("面板卡片按正文去重", src.indexOf("aiChartNodes(shownAiData, shownAiText)") >= 0 && src.indexOf('bodyHasSection(bodyText, ["逆天瞬间"') >= 0);
+ok("长图与报告同样按正文去重", src.indexOf('bodyHasSection(aiText, ["逆天瞬间"') >= 0);
 
 console.log("面板初始化顺序");
 // 回归：v0.32.26 曾把 liveScopeRef.current 的赋值写在 rangeStart 声明之前，
